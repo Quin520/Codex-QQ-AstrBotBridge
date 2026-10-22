@@ -1,0 +1,46 @@
+# Python and development tools
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+.idea/
+.vscode/
+
+# Local application state and credentials
+.env
+.env.*
+.codex/
+.astrbot/
+data/
+logs/
+backups/
+validation*/
+.test-runtime/
+*_config.json
+auth.json
+config.toml
+credentials*
+sessions.json
+sessions.tmp
+builtin-new-command.json
+last-run.jsonl
+last-error.log
+*.log
+*.jsonl
+*.db
+*.db-*
+*.sqlite*
+*.pem
+*.key
+*.p12
+
+# Generated archives and OS files
+*.zip
+dist/
+build/
+Thumbs.db
+.DS_Store

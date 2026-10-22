@@ -1,0 +1,32 @@
+{
+  "owner_qq": {
+    "type": "string",
+    "description": "你的 QQ 号",
+    "hint": "填写你个人的 QQ 号，不是机器人 QQ 号。私聊只响应此账号；留空时不响应任何人。",
+    "default": ""
+  },
+  "group_qq": {
+    "type": "string",
+    "description": "允许使用的 QQ 群号",
+    "hint": "留空时只响应你的私聊。填入一个目标群号后，该群任何人 @机器人都能聊天；每人独立保存上下文。",
+    "default": ""
+  },
+  "codex_exe": {
+    "type": "string",
+    "description": "本机 Codex 程序路径",
+    "hint": "填写这台 Windows 电脑上原生 codex.exe 的绝对路径，不能填写 codex.cmd 或 codex.ps1。查找方法见 README。",
+    "default": ""
+  },
+  "model": {
+    "type": "string",
+    "description": "Codex 模型（可留空）",
+    "hint": "留空使用 Codex CLI 内置默认模型；不会读取你个人 config.toml 中的模型设置。手动填写时使用当前账号可用的模型 ID。",
+    "default": ""
+  },
+  "timeout_seconds": {
+    "type": "int",
+    "description": "单次请求超时秒数",
+    "hint": "范围 30 到 600 秒。",
+    "default": 180
+  }
+}

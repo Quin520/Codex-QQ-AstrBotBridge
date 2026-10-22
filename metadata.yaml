@@ -1,0 +1,9 @@
+name: astrbot_plugin_local_codex
+display_name: 本机 Codex 桥接
+desc: 私聊直接对话，指定 QQ 群成员 @机器人即可聊天，/new 开启个人新会话。
+version: v0.2.0
+author: Quin520
+repo: https://github.com/Quin520/Codex-QQ-AstrBotBridge
+astrbot_version: ">=4.29.1,<5"
+support_platforms:
+  - aiocqhttp
