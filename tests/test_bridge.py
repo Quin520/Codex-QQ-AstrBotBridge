@@ -96,9 +96,30 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(argv[-3:], ("resume", THREAD, "-"))
             self.assertNotIn("--last", argv)
             self.assertIn("read-only", argv)
+            self.assertIn('service_tier="fast"', argv)
+            self.assertIn("features.fast_mode=true", argv)
             for feature in ("shell_tool", "unified_exec", "apps", "plugins"):
                 self.assertEqual(argv[argv.index(feature) - 1], "--disable")
             turn.communicate.assert_awaited_once_with(prompt.encode("utf-8"))
+
+    async def test_fast_mode_can_be_disabled_without_loading_personal_config(self):
+        login = AsyncMock(returncode=0)
+        login.communicate.return_value = (b"Logged in using ChatGPT", b"")
+        turn = AsyncMock(returncode=0)
+        turn.communicate.return_value = (output_for(), b"")
+        with tempfile.TemporaryDirectory() as directory:
+            runner = CodexRunner(
+                Path(sys.executable), Path(directory), 30, "", fast_mode=False
+            )
+            with patch(
+                "astrbot_plugin_local_codex.runner.asyncio.create_subprocess_exec",
+                side_effect=[login, turn],
+            ) as spawn:
+                await runner.run("hello", None)
+            argv = spawn.call_args_list[1].args
+            self.assertIn('service_tier="default"', argv)
+            self.assertNotIn('service_tier="fast"', argv)
+            self.assertIn("--ignore-user-config", argv)
 
     async def test_api_key_login_is_rejected_before_turn(self):
         login = AsyncMock(returncode=0)
@@ -159,7 +180,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 plugin = LocalCodex(None, config)
             plugin.runner.run = AsyncMock(return_value=(THREAD, "Unicode answer"))
             replies = [result async for result in plugin.codex(event)]
-            self.assertEqual(len(replies), 2)
+            self.assertEqual(len(replies), 1)
             self.assertTrue(event.is_stopped())
             self.assertFalse(event.call_llm)
             self.assertEqual(list(plugin.sessions.values()), [THREAD])
@@ -177,7 +198,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "codex hello", message, event.platform_meta, "456"
             )
             self.assertEqual(
-                len([result async for result in plugin.codex(other_event)]), 2
+                len([result async for result in plugin.codex(other_event)]), 1
             )
             self.assertEqual(plugin.runner.run.await_count, 2)
 
@@ -185,7 +206,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
         for prompt in ["First question", "Follow up"]:
             event = event_for(prompt)
             self.assertEqual(
-                len([result async for result in self.plugin.chat(event)]), 2
+                len([result async for result in self.plugin.chat(event)]), 1
             )
             self.assertTrue(event.is_stopped())
             self.assertFalse(event.call_llm)
@@ -208,7 +229,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(event.is_stopped())
         self.plugin.runner.run.assert_not_awaited()
         event = event_for("Hello", "999", "456", "321")
-        self.assertEqual(len([result async for result in self.plugin.chat(event)]), 2)
+        self.assertEqual(len([result async for result in self.plugin.chat(event)]), 1)
         self.plugin.runner.run.assert_awaited_once_with("Hello", None)
 
     async def test_new_resets_only_the_sender_in_the_current_chat(self):

@@ -23,6 +23,34 @@
     "hint": "留空使用 Codex CLI 内置默认模型；不会读取你个人 config.toml 中的模型设置。手动填写时使用当前账号可用的模型 ID。",
     "default": ""
   },
+  "integrate_plugins": {
+    "type": "bool",
+    "description": "接入 AstrBot 插件和人格",
+    "hint": "开启后注册并选用本机 Codex 提供商，启用群内按发送者隔离，聊天经过 AstrBot 插件、人格和工具流程。升级后使用新的 AstrBot 会话；完整说明见 README。",
+    "default": false
+  },
+  "fast_mode": {
+    "type": "bool",
+    "description": "默认启用 Codex Fast 模式",
+    "hint": "开启后请求 Fast 服务速度，不降低思考深度。会更快消耗订阅额度，实际可用性取决于当前模型和账号。关闭后请求 Standard 速度。",
+    "default": true
+  },
+  "user_profiles": {
+    "type": "template_list",
+    "description": "按 QQ 号配置称呼与标签",
+    "hint": "每个 QQ 号添加一条。只向模型提供当前发送者的配置；这里只设置偏好，不改变访问权限。保存后重载插件。",
+    "default": [],
+    "templates": {
+      "person": {
+        "name": "QQ 用户",
+        "items": {
+          "qq": {"type": "string", "description": "QQ 号", "default": ""},
+          "nickname": {"type": "string", "description": "希望机器人使用的称呼", "default": ""},
+          "tags": {"type": "list", "description": "偏好标签", "hint": "例如：喜欢简短回答、编程初学者、喜欢轻松语气。每项填写一个标签。", "default": []}
+        }
+      }
+    }
+  },
   "timeout_seconds": {
     "type": "int",
     "description": "单次请求超时秒数",

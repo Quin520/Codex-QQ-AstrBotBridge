@@ -48,11 +48,19 @@ def parse_result(output: bytes) -> tuple[str, str]:
 class CodexRunner:
     """Keep subprocess ownership so timeout and plugin unload stop our child."""
 
-    def __init__(self, executable: Path, data_dir: Path, timeout: int, model: str):
+    def __init__(
+        self,
+        executable: Path,
+        data_dir: Path,
+        timeout: int,
+        model: str,
+        fast_mode: bool = True,
+    ):
         self.executable = executable
         self.data_dir = data_dir
         self.timeout = timeout
         self.model = model
+        self.fast_mode = fast_mode
         self.process = None
 
     async def stop(self) -> None:
@@ -73,12 +81,23 @@ class CodexRunner:
             process.kill()
         await process.wait()
 
-    async def run(self, prompt: str, thread_id: str | None) -> tuple[str, str]:
+    async def run(
+        self,
+        prompt: str,
+        thread_id: str | None,
+        *,
+        output_schema: Path | None = None,
+        images: list[Path] | None = None,
+        ephemeral: bool = False,
+    ) -> tuple[str, str]:
         """Run one turn using the current Windows user's ChatGPT login.
 
         Args:
             prompt: User text delivered exclusively through stdin.
             thread_id: Explicit conversation ID, or None for a new conversation.
+            output_schema: Optional schema for an AstrBot provider response.
+            images: Explicit message attachments, never paths chosen by the model.
+            ephemeral: Let AstrBot own history instead of persisting a CLI session.
 
         Returns:
             The conversation ID and assistant answer.
@@ -154,6 +173,20 @@ class CodexRunner:
         )
         if self.model:
             args.extend(["--model", self.model])
+        args.extend(
+            [
+                "-c",
+                'service_tier="fast"' if self.fast_mode else 'service_tier="default"',
+                "-c",
+                "features.fast_mode=true",
+            ]
+        )
+        if output_schema:
+            args.extend(["--output-schema", str(output_schema)])
+        if ephemeral:
+            args.append("--ephemeral")
+        for attachment in images or []:
+            args.extend(["--image", str(attachment)])
         if thread_id:
             args.extend(["resume", thread_id])
         args.append("-")
