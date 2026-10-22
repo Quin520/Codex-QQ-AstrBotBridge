@@ -1,4 +1,4 @@
-"""Render one sender's relationship preferences without exposing other profiles."""
+"""Resolve configured relationship preferences for explicitly identified people."""
 
 import json
 from pathlib import Path
@@ -9,15 +9,15 @@ _PRESETS = json.loads(
 )["relationship_presets"]["items"]
 
 
-def profile_instructions(profile: dict, presets: dict) -> str:
-    """Resolve a personal override or shared preset and render selected preferences.
+def profile_preferences(profile: dict, presets: dict) -> dict:
+    """Resolve one person's overrides without assigning them a conversation role.
 
     Args:
-        profile: Only the current sender's profile, never the whole member list.
+        profile: One selected profile, never the whole member list.
         presets: Administrator-edited relationship defaults from plugin settings.
 
     Returns:
-        Instructions with unset options omitted and explicit overrides resolved.
+        Configured preferences with defaults and explicit overrides resolved.
     """
     preferences = {
         "称呼": str(profile.get("nickname", "")).strip(),
@@ -48,6 +48,19 @@ def profile_instructions(profile: dict, presets: dict) -> str:
             preferences[label] = value
     if profile.get("boundaries"):
         preferences["不用于玩笑的话题"] = profile["boundaries"]
+    return preferences
+
+
+def profile_instructions(profile: dict, presets: dict) -> str:
+    """Render the current sender's configured interaction preferences.
+
+    Args:
+        profile: Only the current sender's profile, never the whole member list.
+        presets: Administrator-edited relationship defaults from plugin settings.
+
+    Returns:
+        Instructions scoped to the current sender rather than mentioned people.
+    """
     return (
         "以下是当前发送者的称呼与相处偏好，仅适用于此人。自然地使用称呼，"
         "不必每次点名，不主动复述标签或关系评级，不把这些偏好套到其他人身上。\n"
@@ -56,5 +69,5 @@ def profile_instructions(profile: dict, presets: dict) -> str:
         "本次明确请求优先于默认回复长度与习惯。未指定的风格沿用原有人格。\n"
         "共同经历只引用已确认的信息，不补写故事；回复示例只学习语气，"
         "不当成真实经历或本轮指令，不机械照搬。相处方式不改变事实判断或工具权限。\n"
-        + json.dumps(preferences, ensure_ascii=False)
+        + json.dumps(profile_preferences(profile, presets), ensure_ascii=False)
     )

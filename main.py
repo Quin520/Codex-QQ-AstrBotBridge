@@ -18,6 +18,7 @@ from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
 from .group_context import GroupContext, is_proactive_group
 from .image_generator import ImageGenerator
 from .integration import configure_provider
+from .mentions import mentioned_member_instructions
 from .profile_learning import ProfileLearner
 from .profile_reviews import ProfileReviewStore
 from .profiles import profile_instructions
@@ -177,6 +178,15 @@ class LocalCodex(Star):
             )
         if instructions:
             req.system_prompt = (req.system_prompt or "") + "\n" + instructions
+        if not proactive_group:
+            req.system_prompt = (
+                req.system_prompt or ""
+            ) + mentioned_member_instructions(
+                event,
+                self.config,
+                self.profiles,
+                self.config.get("relationship_presets", {}),
+            )
         req.system_prompt = (req.system_prompt or "") + self.group_context.instructions(
             event, proactive=proactive_group
         )
@@ -360,6 +370,12 @@ class LocalCodex(Star):
                 key = f"{event.unified_msg_origin}|{event.get_sender_id()}"
                 try:
                     instructions = self._profile_instructions(event)
+                    instructions += mentioned_member_instructions(
+                        event,
+                        self.config,
+                        self.profiles,
+                        self.config.get("relationship_presets", {}),
+                    )
                     anchor = str(self.config.get("persona_anchor", "")).strip()
                     if anchor:
                         instructions = anchor + "\n" + instructions
