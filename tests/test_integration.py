@@ -8,7 +8,7 @@ import unittest
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import jsonschema
 from astrbot.api.provider import ProviderRequest
@@ -258,6 +258,82 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
             await manager.terminate_provider(PROVIDER_ID)
             self.assertEqual(manager.provider_insts, [])
             self.assertNotIn(PROVIDER_ID, manager.inst_map)
+
+    async def test_migrated_provider_restarts_and_applies_changed_speed_settings(self):
+        from astrbot.core.provider.manager import ProviderManager
+        from astrbot.core.utils.migra_helper import _migra_provider_to_source_structure
+
+        class Config(dict):
+            save_config = Mock()
+            save_config_async = AsyncMock()
+
+        config = Config(deepcopy(DEFAULT_CONFIG))
+        config["provider"] = [
+            {
+                "id": PROVIDER_ID,
+                "type": "local_codex_cli",
+                "provider_type": "chat_completion",
+                "enable": True,
+                "model": "old-model",
+                "codex_exe": sys.executable,
+                "fast_mode": True,
+            }
+        ]
+        unrelated = {"id": "unrelated", "type": "openai_chat_completion"}
+        config["provider_sources"] = [deepcopy(unrelated)]
+        _migra_provider_to_source_structure(config)
+        config = Config(json.loads(json.dumps(config)))
+        self.assertNotIn("type", config["provider"][0])
+        source_id = config["provider"][0]["provider_source_id"]
+        settings = {
+            **self.plugin.config,
+            "model": "example-model",
+            "reasoning_effort": "low",
+            "max_parallel_requests": 2,
+        }
+        manager = ProviderManager(
+            SimpleNamespace(confs={"default": config}),
+            None,
+            SimpleNamespace(default_persona=""),
+        )
+        context = SimpleNamespace(get_config=lambda: config, provider_manager=manager)
+        with (
+            patch("astrbot.core.provider.manager.astrbot_config", config),
+            patch("astrbot.core.provider.manager.sp.put_async", new=AsyncMock()),
+            patch(
+                "astrbot_plugin_local_codex.provider.StarTools.get_data_dir",
+                return_value=self.root,
+            ),
+        ):
+            try:
+                await configure_provider(context, settings, self.root)
+                await manager.load_provider(config["provider"][0])
+                first = manager.inst_map[PROVIDER_ID]
+                self.assertEqual(first.provider_config["reasoning_effort"], "low")
+                self.assertEqual(first.request_slots._value, 2)
+                manager._mcp_init_task = object()
+                settings.update(
+                    fast_mode=False, reasoning_effort="medium", max_parallel_requests=3
+                )
+                await configure_provider(context, settings, self.root)
+                current = manager.inst_map[PROVIDER_ID]
+                self.assertTrue(first.closed)
+                self.assertIsNot(current, first)
+                self.assertEqual(current.get_model(), "example-model")
+                self.assertFalse(current.provider_config["fast_mode"])
+                self.assertEqual(current.provider_config["reasoning_effort"], "medium")
+                self.assertEqual(current.request_slots._value, 3)
+                self.assertEqual(len(manager.provider_insts), 1)
+                row = config["provider"][0]
+                self.assertEqual(row["provider_source_id"], source_id)
+                self.assertNotIn("type", row)
+                self.assertNotIn("reasoning_effort", row)
+                self.assertEqual(len(config["provider_sources"]), 2)
+                self.assertEqual(config["provider_sources"][0], unrelated)
+                _migra_provider_to_source_structure(config)
+                self.assertEqual(len(config["provider_sources"]), 2)
+            finally:
+                await manager.terminate_provider(PROVIDER_ID)
 
 
 class ProviderTests(unittest.IsolatedAsyncioTestCase):

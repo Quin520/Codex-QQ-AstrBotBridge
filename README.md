@@ -106,6 +106,8 @@ Get-ChildItem -LiteralPath $codexPackage -Filter codex.exe -Recurse |
 
 保存配置并重载插件。模型名称以当前账号在 Codex 中能使用的模型为准；不要填写“Pro”“ChatGPT”或套餐名称。插件使用 `--ignore-user-config`，不会读取个人 `config.toml` 中的模型和工具配置。
 
+开启插件接入模式后，请在本插件中调整 Fast、推理等级和并发数。AstrBot 可能将模型与提供商配置拆开保存；v0.3.2 会更新对应的提供商配置，重启后仍可正常加载。
+
 Fast 模式通过每次调用传入 `service_tier="fast"` 和 `features.fast_mode=true` 请求，不改动个人 Codex 设置。支持情况取决于模型和账号；Fast 会更快消耗订阅额度，当前倍率见 [Codex 官方速度说明](https://learn.chatgpt.com/docs/agent-configuration/speed)。
 
 推理等级通过 `model_reasoning_effort` 单独配置，日常聊天建议 `low`，复杂分析时再选较高等级；它和 Fast 是两个独立参数。若模型本来就默认 `low`，显式选择 `low` 不会再次降低推理等级。后台插件会增加模型调用次数；默认并发 2 可减少排队，但不保证固定回复秒数，也不会增加账号额度。参数说明见 [Codex 官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
@@ -196,6 +198,7 @@ Codex 自身管理登录数据。直接模式保留 CLI 会话；插件接入模
 | 上下文异常 | 发送 `/new`，再重新提问 |
 | AI 插件没有生效 | 确认“接入 AstrBot 插件和人格”已开启，重启后存在 `local_codex`，插件本身启用并正确选择模型 |
 | v0.3.0 私聊只有自学习日志，没有正式回复 | 升级到 v0.3.1 并重启 AstrBot；旧版错误设置了 AstrBot 的默认模型请求抑制标志 |
+| 重启后桥接插件加载报 `KeyError: 'type'` | 升级到 v0.3.2 并重启 AstrBot；旧版没有正确读取 AstrBot 拆分保存的提供商配置 |
 | 表情包没发出 | 检查图包实际包含图片并启用；只有空图包时模型接通也不会产生图片 |
 | 主动消息没发出 | 检查该插件是否启用、目标群会话是否正确、自动触发、静默时段、上下文和无人回应限制 |
 
