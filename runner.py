@@ -58,6 +58,7 @@ class CodexRunner:
         reasoning_effort: str = "low",
         *,
         workspace: Path | None = None,
+        web_search: bool = False,
     ):
         self.executable = executable
         self.data_dir = data_dir
@@ -67,6 +68,7 @@ class CodexRunner:
         if reasoning_effort not in {"low", "medium", "high", "xhigh"}:
             raise ValueError("Reasoning effort must be low, medium, high, or xhigh.")
         self.reasoning_effort = reasoning_effort
+        self.web_search = web_search
         self.workspace = workspace or data_dir / "workspace"
         self.process = None
 
@@ -188,6 +190,8 @@ class CodexRunner:
                 "features.fast_mode=true",
                 "-c",
                 f'model_reasoning_effort="{self.reasoning_effort}"',
+                "-c",
+                'web_search="live"' if self.web_search else 'web_search="disabled"',
             ]
         )
         if output_schema:

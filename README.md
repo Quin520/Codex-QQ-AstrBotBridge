@@ -20,6 +20,7 @@ QQ 普通账号 ⇄ NapCat ⇄ AstrBot / OneBot v11 ⇄ 本机 Codex CLI
 | 并发 | 插件接入模式默认同时处理两个请求，超出后排队；直接模式一次一个，忙时提示重发 |
 | 个性化 | 按 QQ 号设置称呼与偏好标签，只注入当前发送者的配置 |
 | 回复速度 | 默认请求 Fast 模式，可关闭；不额外发送“稍等，我想一下” |
+| 联网搜索 | 可选启用 Codex 自带的在线搜索和公开网页读取，无须另填搜索 API Key |
 | 平台 | Windows 原生运行，AstrBot 的 OneBot v11（`aiocqhttp`）适配器 |
 
 机器人显示为登录 NapCat 的 QQ 账号，头像、昵称和群内身份由该账号决定。账号需通过正常流程加入目标群；此链路不使用 QQ 官方机器人的 Webhook。
@@ -81,6 +82,7 @@ https://github.com/Quin520/Codex-QQ-AstrBotBridge
 | `integrate_plugins` / 接入 AstrBot 插件和人格 | 需要使用其他 AI 插件时开启；自动创建并选用 `local_codex` 提供商，默认关闭以兼容旧版 |
 | `enforce_owner_permissions` / 仅本人可管理 AstrBot，禁止普通成员访问本机 | 可选，默认关闭；接入模式下将此实例管理员设为 `owner_qq`，普通成员本机文件范围设为 `none`，关闭其 Shell、Python 与执行网络权限。影响实例内其他机器人，启用前会备份原值 |
 | `fast_mode` / 默认启用 Codex Fast 模式 | 默认开启，关闭时请求 Standard 速度；不改变思考深度 |
+| `web_search` / 允许 Codex 联网搜索 | 默认关闭；开启后使用 Codex 服务端在线搜索，不开放本机命令和文件权限 |
 | `reasoning_effort` / Codex 推理等级 | 默认 `low`，还可选 `medium`、`high`、`xhigh`；需要所选模型支持 |
 | `max_parallel_requests` / 并发请求数 | 插件接入模式默认 2，范围 1–4；让聊天和自学习等后台请求可以同时运行 |
 | `user_profiles` / 按 QQ 号配置称呼与标签 | 添加“QQ 用户”条目，填写 QQ 号、称呼和标签；默认没有个人资料 |
@@ -112,6 +114,14 @@ Get-ChildItem -LiteralPath $codexPackage -Filter codex.exe -Recurse |
 Fast 模式通过每次调用传入 `service_tier="fast"` 和 `features.fast_mode=true` 请求，不改动个人 Codex 设置。支持情况取决于模型和账号；Fast 会更快消耗订阅额度，当前倍率见 [Codex 官方速度说明](https://learn.chatgpt.com/docs/agent-configuration/speed)。
 
 推理等级通过 `model_reasoning_effort` 单独配置，日常聊天建议 `low`，复杂分析时再选较高等级；它和 Fast 是两个独立参数。若模型本来就默认 `low`，显式选择 `low` 不会再次降低推理等级。后台插件会增加模型调用次数；默认并发 2 可减少排队，但不保证固定回复秒数，也不会增加账号额度。参数说明见 [Codex 官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+### 联网搜索
+
+在“本机 Codex 桥接”配置中打开“允许 Codex 联网搜索”，保存后重启 AstrBot。随后私聊或在目标群 @机器人，发送例如“请先联网查找 AstrBot 的最新发布信息，并附上来源链接”。不需要另填搜索 API Key，也不需要开启 AstrBot 的电脑能力。
+
+该开关每次向 CLI 显式传入 `web_search="live"`；关闭时传入 `web_search="disabled"`。搜索由 Codex 的服务端工具处理，与本机命令联网权限相互独立；不启用本机浏览器、文件读取、Shell 或 Python，也不改变群聊插件工具名单。参考 [Codex 网页搜索说明](https://learn.chatgpt.com/docs/web-search)。
+
+这是桥接自己的搜索能力，不受 AstrBot“网页搜索提供商”开关控制。搜索会使用当前 Codex 账号额度并增加响应时间，是否搜索由模型根据问题决定；明确要求“先搜索再回答”更容易触发。网页打不开、需要登录或搜索失败时，不能保证取得内容。检索词和要读取的公开网址会提交给搜索服务；网页内容作为参考资料，不应当作工具授权或系统指令。
 
 ### 接入已下载的插件
 
@@ -209,6 +219,7 @@ Codex 自身管理登录数据。直接模式保留 CLI 会话；插件接入模
 | 额度不足、限流或请求失败 | 查看本地错误日志中的实际原因；订阅用量和服务限制仍然适用 |
 | 上下文异常 | 发送 `/new`，再重新提问 |
 | AI 插件没有生效 | 确认“接入 AstrBot 插件和人格”已开启，重启后存在 `local_codex`，插件本身启用并正确选择模型 |
+| 机器人说不能联网 | 打开桥接中的“允许 Codex 联网搜索”并重启；新会话中明确要求搜索并提供来源。只开启 AstrBot 原生搜索开关不会绕过桥接工具权限 |
 | v0.3.0 私聊只有自学习日志，没有正式回复 | 升级到 v0.3.1 并重启 AstrBot；旧版错误设置了 AstrBot 的默认模型请求抑制标志 |
 | 重启后桥接插件加载报 `KeyError: 'type'` | 升级到 v0.3.2 并重启 AstrBot；旧版没有正确读取 AstrBot 拆分保存的提供商配置 |
 | 表情包没发出 | 检查图包实际包含图片并启用；只有空图包时模型接通也不会产生图片 |
@@ -244,5 +255,13 @@ python -m tests.smoke_provider --codex-exe 'D:\Apps\Codex\codex.exe'
 ```
 
 该检查使用真实 Codex 和 AstrBot 工具执行器，验证模型选择工具、读取执行结果和识别测试图片，不发送 QQ 消息。需要 AstrBot 环境内可用的 Pillow；会使用账号额度，默认请求 Fast 模式。
+
+验证真实在线搜索及启用搜索后的本机文件隔离：
+
+```powershell
+python -m tests.smoke_search --codex-exe 'D:\Apps\Codex\codex.exe'
+```
+
+该检查发起两次真实模型请求，验证日志中确实出现 `web_search`、回答包含来源链接，并验证一次临时测试文件读取请求被拒绝。测试不读取实际项目文件，不发送 QQ 消息。
 
 本地测试通过不代表 QQ 收发链路已验收。安装后请分别验证个人私聊、普通群成员 @机器人，以及 `@机器人 /new`。

@@ -351,9 +351,13 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                 first = manager.inst_map[PROVIDER_ID]
                 self.assertEqual(first.provider_config["reasoning_effort"], "low")
                 self.assertEqual(first.request_slots._value, 2)
+                self.assertFalse(first.provider_config["web_search"])
                 manager._mcp_init_task = object()
                 settings.update(
-                    fast_mode=False, reasoning_effort="medium", max_parallel_requests=3
+                    fast_mode=False,
+                    reasoning_effort="medium",
+                    max_parallel_requests=3,
+                    web_search=True,
                 )
                 await configure_provider(context, settings, self.root)
                 current = manager.inst_map[PROVIDER_ID]
@@ -363,6 +367,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(current.provider_config["fast_mode"])
                 self.assertEqual(current.provider_config["reasoning_effort"], "medium")
                 self.assertEqual(current.request_slots._value, 3)
+                self.assertTrue(current.provider_config["web_search"])
                 self.assertEqual(len(manager.provider_insts), 1)
                 row = config["provider"][0]
                 self.assertEqual(row["provider_source_id"], source_id)
@@ -427,6 +432,23 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(contexts, [{"role": "assistant", "content": "Earlier answer"}])
         self.assertTrue(self.run.await_args.kwargs["ephemeral"])
         self.assertIsNone(self.run.await_args.args[1])
+
+    async def test_hosted_search_setting_reaches_runner_and_can_be_disabled(self):
+        calls = []
+
+        async def run(runner, prompt, *args, **kwargs):
+            calls.append((runner.web_search, prompt))
+            return THREAD, '{"answer":"Checked public sources","tool_calls":[]}'
+
+        with patch("astrbot_plugin_local_codex.provider.CodexRunner.run", run):
+            for enabled in (True, False):
+                self.provider.provider_config["web_search"] = enabled
+                answer = await self.provider.text_chat(prompt="Search public sources")
+                self.assertEqual(answer.completion_text, "Checked public sources")
+                actual, prompt = calls[-1]
+                self.assertEqual(actual, enabled)
+                self.assertEqual("hosted web search is enabled" in prompt, enabled)
+                self.assertEqual(answer.tools_call_name, [])
 
     async def test_validated_tool_call_is_returned_to_astrbot(self):
         payload = {

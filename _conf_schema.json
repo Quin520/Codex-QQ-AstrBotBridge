@@ -35,6 +35,12 @@
     "hint": "开启后请求 Fast 服务速度，不降低思考深度。会更快消耗订阅额度，实际可用性取决于当前模型和账号。关闭后请求 Standard 速度。",
     "default": true
   },
+  "web_search": {
+    "type": "bool",
+    "description": "允许 Codex 联网搜索",
+    "hint": "使用已登录 Codex 的在线搜索，无须另填搜索 API Key。允许搜索和读取公开网页，不开启本机文件、命令或电脑权限。搜索增加耗时并使用账号额度；保存后重启 AstrBot。",
+    "default": false
+  },
   "enforce_owner_permissions": {
     "type": "bool",
     "description": "仅本人可管理 AstrBot，禁止普通成员访问本机",

@@ -99,9 +99,42 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('service_tier="fast"', argv)
             self.assertIn("features.fast_mode=true", argv)
             self.assertIn('model_reasoning_effort="low"', argv)
+            self.assertIn('web_search="disabled"', argv)
             for feature in ("shell_tool", "unified_exec", "apps", "plugins"):
                 self.assertEqual(argv[argv.index(feature) - 1], "--disable")
             turn.communicate.assert_awaited_once_with(prompt.encode("utf-8"))
+
+    async def test_web_search_does_not_enable_local_execution(self):
+        login = AsyncMock(returncode=0)
+        login.communicate.return_value = (b"Logged in using ChatGPT", b"")
+        turn = AsyncMock(returncode=0)
+        turn.communicate.return_value = (output_for(), b"")
+        with tempfile.TemporaryDirectory() as directory:
+            runner = CodexRunner(
+                Path(sys.executable), Path(directory), 30, "", web_search=True
+            )
+            with patch(
+                "astrbot_plugin_local_codex.runner.asyncio.create_subprocess_exec",
+                side_effect=[login, turn],
+            ) as spawn:
+                await runner.run("Search public documentation", None)
+            argv = spawn.call_args_list[1].args
+            self.assertIn('web_search="live"', argv)
+            self.assertIn("--ignore-user-config", argv)
+            self.assertEqual(argv[argv.index("--sandbox") + 1], "read-only")
+            for feature in (
+                "shell_tool",
+                "unified_exec",
+                "apps",
+                "browser_use",
+                "computer_use",
+                "view_image",
+                "plugins",
+                "skill_search",
+                "multi_agent",
+                "tool_suggest",
+            ):
+                self.assertEqual(argv[argv.index(feature) - 1], "--disable")
 
     async def test_fast_mode_can_be_disabled_without_loading_personal_config(self):
         login = AsyncMock(returncode=0)

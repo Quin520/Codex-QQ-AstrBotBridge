@@ -76,6 +76,7 @@ class LocalCodex(Star):
             str(config.get("model", "")).strip(),
             fast_mode=bool(config.get("fast_mode", True)),
             reasoning_effort=str(config.get("reasoning_effort", "low")),
+            web_search=bool(config.get("web_search", False)),
         )
 
     async def initialize(self) -> None:
