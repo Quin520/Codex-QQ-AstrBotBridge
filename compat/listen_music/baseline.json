@@ -1,0 +1,32 @@
+{
+  "plugin": "astrbot_plugin_listen_music",
+  "version": "0.1.3",
+  "bridge_version": "v0.3.12",
+  "hash_algorithm": "sha256",
+  "files": {
+    "core/bilibili.py": {
+      "before": "076afcaf633c698f44b5c180d9b49fe68dbda4e34fe46f4f92183b61cd5d9da2",
+      "after": "5af649b353938a450b1bead4d96e6f98985ad280b8d931857b0603083701f888"
+    },
+    "core/services.py": {
+      "before": "09ebbdfb36f96ec0670b3fc156d2619f780ceab82ae1fbebd55c0e695324f29f",
+      "after": "1519cfd186633a987f74bd793fe638085255b4be1ba23c88b688ed0104cb0c56"
+    },
+    "main.py": {
+      "before": "0384de132955e656b9a0e337434ae6cb4068d514ea5fab7168f3c3e2f61fc840",
+      "after": "f9aa7521ef12dd3aa1b56923ac607ccc56bc598a492e6234638e793ad008f0da"
+    },
+    "tests/test_bilibili.py": {
+      "before": "cfbf1ce1a8b0a08ccff380064a1f974fa362b11941723efb1abe3b51bcea140d",
+      "after": "17b14a2a883df5b59c5be082ee8af548962d279fdbb12ec4cdcef6cbba41c187"
+    },
+    "tests/test_services.py": {
+      "before": "fe90f4926dcf94719ed26f103e0d01469dfc0ef4058fb7b5249fd1689f783417",
+      "after": "6a49a8e077e584e6a98d126aa419fcc7dbd0f9591414e16d9789bb024a66803a"
+    },
+    "tests/test_main.py": {
+      "before": "677b1cb08ef96ee6be84976b3e2850fc1f5bf1d83ff78edf4159c337962ea845",
+      "after": "3071005dcd59c4e63f1bd47351bb1c00f4f8a32dd40e71078ae9644693c76e57"
+    }
+  }
+}

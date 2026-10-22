@@ -1,0 +1,833 @@
+diff --git a/core/bilibili.py b/core/bilibili.py
+--- a/core/bilibili.py
++++ b/core/bilibili.py
+@@ -20,7 +20,7 @@
+ from collections.abc import Awaitable, Callable, Mapping
+ from dataclasses import dataclass
+ from typing import Any, Literal, TypeAlias
+-from urllib.parse import quote, urlencode, urlsplit
++from urllib.parse import SplitResult, quote, urlencode, urljoin, urlsplit
+
+ import aiohttp
+
+@@ -123,6 +123,10 @@
+     r")(?![0-9A-Za-z])",
+     re.IGNORECASE,
+ )
++_REFERENCE_URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
++_REFERENCE_HOSTS = frozenset(
++    {"b23.tv", "bilibili.com", "www.bilibili.com", "m.bilibili.com"}
++)
+
+ CookieMap: TypeAlias = Mapping[str, str]
+ CookieGetter: TypeAlias = Callable[[], CookieMap | Awaitable[CookieMap | None] | None]
+@@ -131,6 +135,14 @@
+
+ class BilibiliError(RuntimeError):
+     """Raised when a Bilibili response cannot be used safely."""
++
++
++class BilibiliHttpError(BilibiliError):
++    """An HTTP failure whose status can be reported without exposing URLs."""
++
++    def __init__(self, status: int) -> None:
++        self.status = status
++        super().__init__(f"Bilibili request failed (HTTP {status})")
+
+
+ class BilibiliApiError(BilibiliError):
+@@ -174,14 +186,20 @@
+ def parse_bilibili_video_ref(value: str | None) -> BilibiliVideoRef | None:
+     """Extract the first literal AV or BV identifier from user-supplied text.
+
+-    This is deliberately a pure parser.  Standard ``bilibili.com/video`` URLs
+-    work because their literal AV/BV token is extracted; ``b23.tv`` links are
+-    not followed or otherwise resolved.
++    Only approved video URLs and standalone IDs are accepted. Short links are
++    validated here but resolved separately, without visiting the landing page.
+     """
+
+     if not isinstance(value, str):
+         return None
+-    match = _VIDEO_REF_TOKEN_RE.search(value)
++    urls = [
++        _validate_reference_url(url.rstrip("。，,!?！?）)"))
++        for url in _REFERENCE_URL_RE.findall(value)
++    ]
++    for parsed in urls:
++        if parsed.hostname != "b23.tv":
++            return parse_bilibili_video_ref(parsed.path.removeprefix("/video/"))
++    match = _VIDEO_REF_TOKEN_RE.search(_REFERENCE_URL_RE.sub(" ", value))
+     if match is None:
+         return None
+     bvid = match.group("bvid")
+@@ -189,6 +207,66 @@
+         return BilibiliVideoRef(bvid=bvid)
+     aid = match.group("aid")
+     return BilibiliVideoRef(aid=int(aid[2:])) if aid is not None else None
++
++
++def _validate_reference_url(value: str) -> SplitResult:
++    """Validate a reference before any network request or identifier extraction.
++
++    Args:
++        value: Complete URL from user input or a short-link Location header.
++
++    Returns:
++        Parsed URL restricted to approved hosts and video/reference paths.
++
++    Raises:
++        ValueError: If the URL is not an approved public Bilibili reference.
++    """
++    try:
++        parsed = urlsplit(value)
++        if (
++            parsed.scheme not in {"http", "https"}
++            or parsed.hostname not in _REFERENCE_HOSTS
++            or parsed.username is not None
++            or parsed.password is not None
++            or parsed.port is not None
++            or "\\" in value
++            or any(ord(char) < 32 for char in value)
++        ):
++            raise ValueError
++        pattern = (
++            r"/[A-Za-z0-9]{1,32}/?"
++            if parsed.hostname == "b23.tv"
++            else r"/video/(?:BV[0-9A-Za-z]{10}|av[1-9][0-9]{0,18})/?"
++        )
++        if re.fullmatch(pattern, parsed.path, re.IGNORECASE) is None:
++            raise ValueError
++    except ValueError as exc:
++        raise ValueError(
++            "仅支持合法的 Bilibili 视频链接或 b23.tv 短链接（不支持端口或账号信息）"
++        ) from exc
++    return parsed
++
++
++def parse_bilibili_short_url(value: str) -> str | None:
++    """Return a validated short link, dropping tracking parameters.
++
++    Args:
++        value: User-supplied text containing an optional short link.
++
++    Returns:
++        An HTTPS b23.tv URL, or None when no short link exists.
++
++    Raises:
++        ValueError: If an embedded URL is not an approved reference.
++    """
++    urls = [
++        _validate_reference_url(url.rstrip("。，,!?！?）)"))
++        for url in _REFERENCE_URL_RE.findall(value)
++    ]
++    for parsed in urls:
++        if parsed.hostname == "b23.tv":
++            return f"https://b23.tv{parsed.path}"
++    return None
+
+
+ @dataclass(frozen=True, slots=True)
+@@ -396,6 +474,10 @@
+         self._wbi_lock = asyncio.Lock()
+         self._qr_sessions: dict[str, _PendingQrLogin] = {}
+         self._qr_lock = asyncio.Lock()
++        self._detail_semaphore = asyncio.Semaphore(1)
++        self._detail_cache: dict[tuple[str, str], tuple[float, BilibiliVideo]] = {}
++        self._detail_next_request = 0.0
++        self._detail_limited_until = 0.0
+
+     async def search_videos(
+         self, query: str, *, limit: int = 20
+@@ -442,15 +524,93 @@
+     async def get_video(self, bvid: str) -> BilibiliVideo:
+         """Fetch a video's current page list for matching and audio resolution."""
+         normalized_bvid = _normalise_bvid(bvid)
+-        data = await self._wbi_data(_VIEW_URL, {"bvid": normalized_bvid})
+-        return self._parse_video_detail(data, fallback_bvid=normalized_bvid)
++        return await self._get_video_detail({"bvid": normalized_bvid})
+
+     async def get_video_by_aid(self, aid: int) -> BilibiliVideo:
+         """Fetch video detail by AV ID and retain Bilibili's canonical BV ID."""
+         if isinstance(aid, bool) or not isinstance(aid, int) or aid <= 0:
+             raise ValueError("aid must be a positive integer")
+-        data = await self._wbi_data(_VIEW_URL, {"aid": aid})
+-        return self._parse_video_detail(data, fallback_bvid=None)
++        return await self._get_video_detail({"aid": aid})
++
++    async def _get_video_detail(self, params: Mapping[str, Any]) -> BilibiliVideo:
++        """Share a bounded detail cache and request budget across all searches.
++
++        Args:
++            params: One validated BV or AV identifier.
++
++        Returns:
++            Current video details, cached for at most 60 seconds.
++
++        Raises:
++            BilibiliError: If the upstream request fails or is temporarily limited.
++        """
++        key = next((name, str(value)) for name, value in params.items())
++        async with self._detail_semaphore:
++            now = time.monotonic()
++            cached = self._detail_cache.get(key)
++            if cached is not None and cached[0] > now:
++                return cached[1]
++            if now < self._detail_limited_until:
++                raise BilibiliHttpError(412)
++            await asyncio.sleep(max(0.0, self._detail_next_request - now))
++            try:
++                data = await self._wbi_data(_VIEW_URL, params)
++            except BilibiliHttpError as exc:
++                if exc.status == 412:
++                    self._detail_limited_until = time.monotonic() + 5.0
++                raise
++            finally:
++                self._detail_next_request = time.monotonic() + 0.2
++            video = self._parse_video_detail(data, fallback_bvid=params.get("bvid"))
++            self._detail_cache = {
++                entry: item
++                for entry, item in self._detail_cache.items()
++                if item[0] > time.monotonic()
++            }
++            if len(self._detail_cache) >= 128:
++                self._detail_cache.pop(next(iter(self._detail_cache)))
++            self._detail_cache[key] = (time.monotonic() + 60.0, video)
++            return video
++
++    async def resolve_short_link(self, value: str) -> BilibiliVideoRef:
++        """Read bounded, validated redirects without loading the video webpage.
++
++        Args:
++            value: An approved b23.tv reference URL.
++
++        Returns:
++            The exact video reference from the final Location header.
++
++        Raises:
++            BilibiliError: If resolution fails or redirects outside approved hosts.
++        """
++        try:
++            url = parse_bilibili_short_url(value)
++            if url is None:
++                raise ValueError("请提供合法的 b23.tv 短链接")
++            for _ in range(3):
++                async with self._session.get(
++                    url, headers=self._headers(), allow_redirects=False
++                ) as response:
++                    if response.status not in {301, 302, 303, 307, 308}:
++                        raise BilibiliHttpError(response.status)
++                    location = response.headers.get("Location", "")
++                    if not location:
++                        raise BilibiliError(
++                            "Bilibili short link has no redirect target"
++                        )
++                    target = urljoin(url, location)
++                    parsed = _validate_reference_url(target)
++                    if parsed.hostname != "b23.tv":
++                        reference = parse_bilibili_video_ref(target)
++                        if reference is not None:
++                            return reference
++                    url = f"https://b23.tv{parsed.path}"
++            raise BilibiliError("Bilibili short link exceeded the redirect limit")
++        except (ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
++            raise BilibiliError(
++                "Bilibili 短链接解析失败：链接无效或网络暂时不可用"
++            ) from exc
+
+     @staticmethod
+     def _parse_video_detail(
+@@ -749,9 +909,7 @@
+             ) as response:
+                 text = await response.text()
+                 if response.status >= 400:
+-                    raise BilibiliError(
+-                        f"Bilibili request failed (HTTP {response.status})"
+-                    )
++                    raise BilibiliHttpError(response.status)
+                 try:
+                     payload = json.loads(text)
+                 except json.JSONDecodeError as exc:
+diff --git a/core/services.py b/core/services.py
+--- a/core/services.py
++++ b/core/services.py
+@@ -9,13 +9,21 @@
+ from __future__ import annotations
+
+ import asyncio
++import logging
+ from collections.abc import Sequence
+ from dataclasses import dataclass
+ import re
+ from typing import Any, Protocol
+ import unicodedata
+
+-from .bilibili import BilibiliVideoRef
++from .bilibili import (
++    BilibiliApiError,
++    BilibiliError,
++    BilibiliHttpError,
++    BilibiliVideoRef,
++    parse_bilibili_short_url,
++    parse_bilibili_video_ref,
++)
+ from .matcher import filter_bilibili_candidates, prepare_bilibili_search_query
+ from .media import (
+     FfmpegUnavailableError,
+@@ -33,6 +41,7 @@
+ BILIBILI_VIDEO_LIMIT = 12
+ BILIBILI_DETAIL_CONCURRENCY = 4
+ BILIBILI_PAGE_LIMIT = 48
++logger = logging.getLogger(__name__)
+
+
+ class MusicSearchError(RuntimeError):
+@@ -68,6 +77,8 @@
+
+
+ class _BilibiliClient(Protocol):
++    async def resolve_short_link(self, value: str) -> BilibiliVideoRef: ...
++
+     async def search_videos(
+         self, query: str, *, limit: int = BILIBILI_VIDEO_LIMIT
+     ) -> Sequence[Any]: ...
+@@ -118,6 +129,20 @@
+         if not session_id.strip():
+             raise ValueError("session_id must not be blank")
+
++        if video_ref is None:
++            try:
++                video_ref = parse_bilibili_video_ref(query)
++                short_url = (
++                    parse_bilibili_short_url(query) if video_ref is None else None
++                )
++                if short_url is not None:
++                    video_ref = await self._bilibili.resolve_short_link(short_url)
++            except ValueError as exc:
++                raise MusicSearchError(str(exc)) from exc
++            except BilibiliError as exc:
++                raise MusicSearchError(
++                    _source_failure_message(exc, "短链接解析")
++                ) from exc
+         if video_ref is None:
+             requested_query, candidates = await self._filtered_candidates(
+                 query,
+@@ -176,6 +201,8 @@
+             except MusicSearchError:
+                 # The second query improves recall only; a source failure must
+                 # never discard usable candidates from the primary query.
++                if not filtered:
++                    raise
+                 fallback_candidates = ()
+             filtered = _merge_candidates(
+                 filtered,
+@@ -204,11 +231,12 @@
+                 limit=BILIBILI_VIDEO_LIMIT,
+             )
+         except Exception as exc:
+-            raise MusicSearchError("Bilibili 搜索暂时不可用，请稍后重试") from exc
++            raise MusicSearchError(_source_failure_message(exc, "搜索")) from exc
+         if not videos:
+             return ()
+
+         semaphore = asyncio.Semaphore(BILIBILI_DETAIL_CONCURRENCY)
++        failures: list[Exception] = []
+
+         async def fetch(video: Any) -> Any | None:
+             bvid = str(getattr(video, "bvid", "")).strip()
+@@ -217,10 +245,22 @@
+             try:
+                 async with semaphore:
+                     return await self._bilibili.get_video(bvid)
+-            except Exception:
++            except Exception as exc:
++                failures.append(exc)
+                 return None
+
+         detailed = await asyncio.gather(*(fetch(video) for video in videos))
++        if failures:
++            logger.warning(
++                "Bilibili video details failed for %d/%d search results (%s)",
++                len(failures),
++                len(videos),
++                f"{type(failures[0]).__name__}, status={getattr(failures[0], 'status', 'unknown')}",
++            )
++            if all(video is None for video in detailed):
++                raise MusicSearchError(
++                    _source_failure_message(failures[0], "视频详情获取")
++                ) from failures[0]
+         candidates: list[BilibiliCandidate] = []
+         for search_hit, video in zip(videos, detailed):
+             if video is None:
+@@ -235,6 +275,10 @@
+             )
+             if len(candidates) >= BILIBILI_PAGE_LIMIT:
+                 return tuple(candidates[:BILIBILI_PAGE_LIMIT])
++        if not candidates and failures:
++            raise MusicSearchError(
++                _source_failure_message(failures[0], "视频详情获取")
++            ) from failures[0]
+         return tuple(candidates)
+
+     async def _reference_candidates(
+@@ -252,7 +296,10 @@
+                 assert video_ref.aid is not None
+                 video = await self._bilibili.get_video_by_aid(video_ref.aid)
+         except Exception as exc:
+-            raise MusicSearchError("无法打开指定的 Bilibili 视频") from exc
++            raise MusicSearchError(
++                "无法打开指定的 Bilibili 视频："
++                + _source_failure_message(exc, "详情获取")
++            ) from exc
+         return _expand_video_candidates(
+             video,
+             search_title=str(getattr(video, "title", "")).strip(),
+@@ -306,6 +353,25 @@
+         except Exception as exc:
+             raise DeliveryError("Bilibili 未返回可播放音频") from exc
+         return DeliveryResult(candidate=candidate, media=media)
++
++
++def _source_failure_message(exc: Exception, operation: str) -> str:
++    """Describe upstream failures without leaking request URLs or credentials.
++
++    Args:
++        exc: Underlying request failure.
++        operation: Short operation label for the user.
++
++    Returns:
++        A retryable source error, distinct from an empty song catalogue.
++    """
++    if isinstance(exc, BilibiliHttpError):
++        if exc.status in {403, 412, 429}:
++            return f"Bilibili {operation}暂时受限（HTTP {exc.status}），请稍后重试；这不代表没有音源"
++        return f"Bilibili {operation}失败（HTTP {exc.status}），请稍后重试"
++    if isinstance(exc, BilibiliApiError):
++        return f"Bilibili {operation}暂时不可用（接口代码 {exc.code}），请稍后重试"
++    return f"Bilibili {operation}暂时不可用，请稍后重试"
+
+
+ def format_search_results(snapshot: SearchSnapshot) -> str:
+diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -292,7 +292,7 @@
+         "properties": {
+             "title": {
+                 "type": "string",
+-                "description": "具体歌曲名；“唱首歌”时必须先选定一首具体歌曲。",
++                "description": "具体歌曲名，或用户提供的 Bilibili 视频链接、b23.tv 短链接、BV/AV号；有链接时原样填写链接，不要重新猜歌名。",
+             },
+             "artist": {
+                 "type": "string",
+@@ -320,7 +320,7 @@
+         super().__init__(
+             name="find_music",
+             description=(
+-                "仅用于直接听歌前的隐藏检索。传入整理后的具体歌名、歌手和版本偏好；"
++                "用于听歌或翻唱前的隐藏音源检索。用户给出 Bilibili 视频链接、b23.tv 短链接或 BV/AV号时，直接放入 title 精确解析，不再关键词搜索；否则传入具体歌名、歌手和版本偏好；"
+                 "“唱首歌”时先选定一首再调用。本工具返回当前会话的候选给你判断，"
+                 "不向用户发送候选，也不发送音乐。成功后必须仅从返回的 search_id 和 position 中选择，"
+                 "候选评估时，歌名精确或完整匹配优先；用户给出歌手时，以候选标题、搜索标题或分P标题中的歌手线索佐证。"
+diff --git a/tests/test_bilibili.py b/tests/test_bilibili.py
+--- a/tests/test_bilibili.py
++++ b/tests/test_bilibili.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+
++import asyncio
+ from pathlib import Path
+ import sys
+ import unittest
+@@ -17,6 +18,8 @@
+
+ from core.bilibili import (
+     BilibiliClient,
++    BilibiliError,
++    BilibiliHttpError,
+     BilibiliVideoRef,
+     derive_wbi_mixin_key,
+     parse_bilibili_video_ref,
+@@ -25,6 +28,18 @@
+
+
+ class BilibiliVideoRefTests(unittest.TestCase):
++    def test_untrusted_url_cannot_smuggle_a_video_id(self) -> None:
++        for value in (
++            "https://example.com/video/BV1Q541167Qg",
++            "https://www.bilibili.com:443/video/BV1Q541167Qg",
++            "https://name@www.bilibili.com/video/BV1Q541167Qg",
++            "https://www.bilibili.com.evil.test/video/BV1Q541167Qg",
++            "https://127.0.0.1/video/BV1Q541167Qg",
++            "ftp://www.bilibili.com/video/BV1Q541167Qg",
++        ):
++            with self.subTest(value=value), self.assertRaises(ValueError):
++                parse_bilibili_video_ref(value)
++
+     def test_parse_accepts_literal_ids_and_standard_video_urls(self) -> None:
+         bvid = "BV1Q541167Qg"
+         cases = (
+@@ -166,6 +181,188 @@
+
+
+ class BilibiliProtocolTests(unittest.IsolatedAsyncioTestCase):
++    async def test_untrusted_short_link_input_is_rejected_without_network(self) -> None:
++        class Session:
++            def get(self, *_args, **_kwargs):
++                raise AssertionError("invalid short links must not perform requests")
++
++        for value in (
++            "https://evil.test/path",
++            "https://b23.tv:443/path",
++            "https://user@b23.tv/path",
++            "http://127.0.0.1/path",
++        ):
++            with self.subTest(value=value), self.assertRaises(BilibiliError):
++                await BilibiliClient(Session()).resolve_short_link(value)
++
++    async def test_real_http_412_is_preserved_as_typed_source_error(self) -> None:
++        class Response:
++            status = 412
++
++            async def text(self):
++                return "request blocked"
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            def get(self, *_args, **_kwargs):
++                return Response()
++
++        with self.assertRaises(BilibiliHttpError) as error:
++            await BilibiliClient(Session())._request_json(
++                "https://api.bilibili.com/example"
++            )
++        self.assertEqual(error.exception.status, 412)
++
++    async def test_short_link_only_reads_redirect_and_never_visits_landing_page(
++        self,
++    ) -> None:
++        class Response:
++            status = 302
++            headers = {
++                "Location": "https://www.bilibili.com/video/BV1Q541167Qg/?share_source=copy"
++            }
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            def __init__(self):
++                self.calls = []
++
++            def get(self, url, **kwargs):
++                self.calls.append((url, kwargs))
++                return Response()
++
++        session = Session()
++        client = BilibiliClient(session)
++        result = await client.resolve_short_link(
++            "https://b23.tv/Example?share_source=copy"
++        )
++        self.assertEqual(result, BilibiliVideoRef(bvid="BV1Q541167Qg"))
++        self.assertEqual(len(session.calls), 1)
++        self.assertEqual(session.calls[0][0], "https://b23.tv/Example")
++        self.assertFalse(session.calls[0][1]["allow_redirects"])
++        self.assertNotIn("Cookie", session.calls[0][1]["headers"])
++
++    async def test_short_link_rejects_untrusted_redirects_before_requesting_them(
++        self,
++    ) -> None:
++        class Response:
++            status = 302
++
++            def __init__(self, target):
++                self.headers = {"Location": target}
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            def __init__(self, target):
++                self.target = target
++                self.calls = []
++
++            def get(self, url, **_kwargs):
++                self.calls.append(url)
++                return Response(self.target)
++
++        for target in (
++            "http://127.0.0.1/private",
++            "https://example.com/video/BV1Q541167Qg",
++            "https://name@www.bilibili.com/video/BV1Q541167Qg",
++            "https://b23.tv:443/abc",
++            "//169.254.169.254/latest/meta-data",
++            "https://www.bilibili.com\\@127.0.0.1/video/BV1Q541167Qg",
++        ):
++            with self.subTest(target=target):
++                session = Session(target)
++                with self.assertRaises(BilibiliError):
++                    await BilibiliClient(session).resolve_short_link(
++                        "https://b23.tv/Example"
++                    )
++                self.assertEqual(session.calls, ["https://b23.tv/Example"])
++
++    async def test_short_link_loop_is_bounded(self) -> None:
++        class Response:
++            status = 302
++            headers = {"Location": "/Example"}
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            calls = 0
++
++            def get(self, *_args, **_kwargs):
++                self.calls += 1
++                return Response()
++
++        session = Session()
++        with self.assertRaisesRegex(BilibiliError, "redirect limit"):
++            await BilibiliClient(session).resolve_short_link("https://b23.tv/Example")
++        self.assertEqual(session.calls, 3)
++
++    async def test_detail_budget_and_cache_are_shared_across_concurrent_requests(
++        self,
++    ) -> None:
++        class Client(FixtureBilibiliClient):
++            def __init__(self):
++                super().__init__(object())
++                self.inflight = self.peak = self.calls = 0
++
++            async def _wbi_data(self, endpoint, params):
++                self.calls += 1
++                self.inflight += 1
++                self.peak = max(self.peak, self.inflight)
++                await asyncio.sleep(0.01)
++                self.inflight -= 1
++                return await super()._wbi_data(endpoint, params)
++
++        client = Client()
++        await asyncio.gather(
++            client.get_video("BVone"),
++            client.get_video("BVone"),
++            client.get_video("BVtwo"),
++        )
++        self.assertEqual(client.calls, 2)
++        self.assertEqual(client.peak, 1)
++
++    async def test_412_stops_queued_detail_burst_without_automatic_retries(
++        self,
++    ) -> None:
++        class Client(BilibiliClient):
++            calls = 0
++
++            async def _wbi_data(self, *_args, **_kwargs):
++                self.calls += 1
++                raise BilibiliHttpError(412)
++
++        client = Client(object())
++        results = await asyncio.gather(
++            *(client.get_video(f"BV{index}") for index in range(8)),
++            return_exceptions=True,
++        )
++        self.assertEqual(client.calls, 1)
++        self.assertTrue(
++            all(
++                isinstance(result, BilibiliHttpError) and result.status == 412
++                for result in results
++            )
++        )
++
+     def test_wbi_signing_fixture_filters_reserved_characters(self) -> None:
+         key = derive_wbi_mixin_key(
+             "https://i0.hdslb.com/bfs/wbi/7cd084941338484aae1ad9425b84077c.png",
+diff --git a/tests/test_services.py b/tests/test_services.py
+--- a/tests/test_services.py
++++ b/tests/test_services.py
+@@ -15,7 +15,7 @@
+     VOICE_MEDIA_LIMITS,
+     MediaError,
+ )
+-from core.bilibili import BilibiliVideoRef
++from core.bilibili import BilibiliHttpError, BilibiliVideoRef
+ from core.models import LocalMedia, ResolvedAudio
+ from core.services import (
+     SEARCH_LIMIT,
+@@ -158,6 +158,115 @@
+
+
+ class BilibiliWorkflowTests(unittest.IsolatedAsyncioTestCase):
++    async def test_empty_primary_search_does_not_hide_fallback_source_failure(
++        self,
++    ) -> None:
++        client = FakeBilibili((), query_errors={"歌曲": BilibiliHttpError(412)})
++        with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++            await SearchService(client).search(
++                session_id="chat-a", query="歌曲 歌手", song_title="歌曲"
++            )
++
++    async def test_partial_failure_with_no_deliverable_page_is_a_source_error(
++        self,
++    ) -> None:
++        class Client(FakeBilibili):
++            async def get_video(self, bvid):
++                if bvid == "BV2":
++                    raise BilibiliHttpError(412)
++                return await super().get_video(bvid)
++
++        client = Client((video("BV1", pages=(Page(1, "song", 9999999),)), video("BV2")))
++        with self.assertLogs("core.services", level="WARNING"):
++            with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++                await SearchService(client).search(
++                    session_id="chat-a", query="歌曲", max_duration_ms=900000
++                )
++
++    async def test_all_detail_failures_preserve_412_instead_of_empty_catalogue(
++        self,
++    ) -> None:
++        client = FakeBilibili(
++            (video("BV1"), video("BV2")), reference_error=BilibiliHttpError(412)
++        )
++        search = SearchService(client)
++        with self.assertLogs("core.services", level="WARNING") as logs:
++            with self.assertRaisesRegex(
++                MusicSearchError, "HTTP 412.*稍后重试"
++            ) as error:
++                await search.search(
++                    session_id="chat-a", query="歌曲 歌手", song_title="歌曲"
++                )
++        self.assertNotIn("没有找到", str(error.exception))
++        self.assertEqual(client.search_queries, ["歌曲 歌手"])
++        self.assertIn("2/2", logs.output[0])
++
++    async def test_partial_detail_failure_keeps_usable_results_and_warns(self) -> None:
++        class Client(FakeBilibili):
++            async def get_video(self, bvid):
++                if bvid == "BV2":
++                    raise BilibiliHttpError(412)
++                return await super().get_video(bvid)
++
++        client = Client((video("BV1"), video("BV2")))
++        with self.assertLogs("core.services", level="WARNING") as logs:
++            snapshot = await SearchService(client).search(
++                session_id="chat-a", query="歌曲"
++            )
++        self.assertEqual([candidate.bvid for candidate in snapshot.candidates], ["BV1"])
++        self.assertIn("1/2", logs.output[0])
++
++    async def test_search_endpoint_and_exact_reference_report_412(self) -> None:
++        search = SearchService(FakeBilibili((), search_error=BilibiliHttpError(412)))
++        with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++            await search.search(session_id="chat-a", query="歌曲")
++        client = FakeBilibili((), reference_error=BilibiliHttpError(412))
++        with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++            await SearchService(client).search(
++                session_id="chat-a", query="https://www.bilibili.com/video/BV1Q541167Qg"
++            )
++        self.assertEqual(client.search_queries, [])
++
++    async def test_network_detail_failures_are_not_reported_as_missing_songs(
++        self,
++    ) -> None:
++        client = FakeBilibili((video("BV1"),), reference_error=TimeoutError())
++        with self.assertLogs("core.services", level="WARNING"):
++            with self.assertRaisesRegex(MusicSearchError, "暂时不可用.*稍后重试"):
++                await SearchService(client).search(session_id="chat-a", query="歌曲")
++
++    async def test_link_title_creates_scoped_candidates_without_keyword_search(
++        self,
++    ) -> None:
++        class Client(FakeBilibili):
++            def __init__(self):
++                super().__init__((video("BV1Q541167Qg"),))
++                self.short_calls = []
++
++            async def resolve_short_link(self, value):
++                self.short_calls.append(value)
++                return BilibiliVideoRef(bvid="BV1Q541167Qg")
++
++        client = Client()
++        search = SearchService(client)
++        for query in (
++            "https://b23.tv/Example",
++            "https://www.bilibili.com/video/BV1Q541167Qg/?p=1",
++            "BV1Q541167Qg",
++        ):
++            snapshot = await search.search(
++                session_id="chat-a", query=query, song_title=query
++            )
++            self.assertEqual(snapshot.candidates[0].bvid, "BV1Q541167Qg")
++            self.assertIsNone(
++                search.snapshot(search_id=snapshot.search_id, session_id="chat-b")
++            )
++            self.assertIsNotNone(
++                search.snapshot(search_id=snapshot.search_id, session_id="chat-a")
++            )
++        self.assertEqual(client.search_queries, [])
++        self.assertEqual(client.short_calls, ["https://b23.tv/Example"])
++
+     async def _workflow(
+         self,
+         videos: tuple[Video, ...],
+diff --git a/tests/test_main.py b/tests/test_main.py
+--- a/tests/test_main.py
++++ b/tests/test_main.py
+@@ -291,6 +291,43 @@
+
+
+ class MainContractTests(unittest.IsolatedAsyncioTestCase):
++    async def test_find_music_resolves_user_short_link_through_real_search_service(
++        self,
++    ) -> None:
++        class Client:
++            async def resolve_short_link(self, value):
++                self.resolved = value
++                return listen_main.parse_bilibili_video_ref("BV1Q541167Qg")
++
++            async def get_video(self, bvid):
++                return types.SimpleNamespace(
++                    bvid=bvid,
++                    title="Exact linked song",
++                    uploader="",
++                    pages=(
++                        types.SimpleNamespace(cid=12, title="song", duration_ms=120000),
++                    ),
++                )
++
++            async def search_videos(self, *_args, **_kwargs):
++                raise AssertionError("a user link must not become a keyword search")
++
++        client = Client()
++        plugin = object.__new__(listen_main.ListenMusicPlugin)
++        plugin._search = listen_main.SearchService(client)
++        _configure_selection_waits(plugin)
++        event = _SendingEvent("chat-a", "https://b23.tv/Example 这个翻唱一下")
++        payload = json.loads(
++            await plugin.find_music_for_llm(event, "https://b23.tv/Example")
++        )
++        self.assertEqual(payload["status"], "candidates")
++        self.assertEqual(payload["candidates"][0]["title"], "Exact linked song - song")
++        self.assertEqual(client.resolved, "https://b23.tv/Example")
++        self.assertEqual(event.sent, [])
++        self.assertIsNone(
++            plugin._search.snapshot(search_id=payload["search_id"], session_id="chat-b")
++        )
++
+     def setUp(self) -> None:
+         listen_main.FILTERS.clear()
+         listen_main.SessionWaiter.instances.clear()

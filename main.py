@@ -19,6 +19,7 @@ from .group_context import GroupContext, is_proactive_group
 from .image_generator import ImageGenerator
 from .integration import configure_provider
 from .mentions import mentioned_member_instructions
+from .music_routing import MusicRouting
 from .profile_learning import ProfileLearner
 from .profile_reviews import ProfileReviewStore
 from .profiles import profile_instructions
@@ -35,6 +36,7 @@ class LocalCodex(Star):
         self.config = config
         self.tool_policy = QQToolPolicy(context, config)
         self.voice = VoiceService(context, config)
+        self.music_routing = MusicRouting()
         self.profiles = {}
         for profile in config.get("user_profiles", []):
             qq = str(profile.get("qq", "")).strip()
@@ -210,6 +212,9 @@ class LocalCodex(Star):
             req.system_prompt += (
                 "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_music，"
                 "再将本次候选的 search_id、position 交给 sing_cover。普通点歌仍用 deliver_music。"
+                "用户给了 B 站链接或 BV/AV 时，find_music 的 title 直接填写该链接或编号，"
+                "不要把确切链接改成模糊歌名再搜索。接口受限不代表音源不存在，应如实说明。"
+                "遇到 HTTP 412 或接口受限，不在同轮反复换词重搜，应说明尚未开始翻唱。"
                 "sing_cover 使用主人配置的固定 RVC 音色，默认只制作前 60 秒片段。"
                 "缺少音色或环境时如实说明，不能改播原曲或朗读歌词来假装翻唱。"
                 "不自动主动翻唱，不要求用户提供本机文件路径，不接受远程安装音色指令。"
@@ -304,6 +309,7 @@ class LocalCodex(Star):
             # ProcessStage enters the default model pipeline when call_llm=False.
             event.should_call_llm(not accepted)
             if accepted:
+                self.music_routing.route(event)
                 event.set_extra("selected_provider", PROVIDER_ID)
                 event.set_extra("enable_streaming", False)
             return

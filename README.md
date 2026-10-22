@@ -176,6 +176,8 @@ Edge TTS 无需 API Key，但属于微软在线服务：**需要朗读的文本�
 
 启用“我想听歌！”v0.1.3、插件接入模式和“允许固定角色音色翻唱”，然后说 `@机器人 用你的声音翻唱《歌名》`。模型先用 `find_music` 搜歌，再把本次候选交给 `sing_cover`。普通“播放《歌名》”仍播放原曲。
 
+安装[听歌插件 0.1.3 兼容补丁](compat/listen_music/README.md)后，可以直接发 `@机器人 翻唱这个 https://b23.tv/短链接`，或提供 BV/AV 编号、B 站视频长链接。明确音乐请求不会被自动链接预览抢先响应；同一个人刚点歌后再补一条纯链接也可继续，群内仍需 @机器人。无需关闭链接解析插件。短链只解析到合法 B 站视频编号，不访问任意网址。B 站接口受限会明确报错，不能保证第三方接口永远可用。
+
 翻唱流程：下载选中的音源 → 截取片段 → 分离人声和伴奏 → RVC 转换为角色音色 → 混音 → 当前会话 QQ 语音。它保留已有歌曲的旋律和歌词，不是按主题创作新歌。尚未选择角色模型时只提示未就绪；不会用原曲或朗读歌词代替成功结果。
 
 后端针对 [RVC 官方仓库](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) commit `81eed5e8f68b6bed1789f682fe78cdd324495afc` 的 `infer/cli.py` 和 `tools.pymss.cli` 实现。参照该版本[安装文档](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI/blob/81eed5e8f68b6bed1789f682fe78cdd324495afc/docs/en/README.en.md)，使用 **单独 Python 3.12 环境**，不要把 Torch、分离器等依赖装入 AstrBot。RTX 50 系使用官方列出的 Torch/Torchaudio `2.7.1+cu128` 及 `requirments_cu128_py312.txt`。
