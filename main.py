@@ -8,11 +8,13 @@ from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest, ProviderType
 from astrbot.api.star import Context, Star, StarTools
+from astrbot.core.agent.tool import ToolSet
 from astrbot.core.message.components import At, Plain
 from astrbot.core.star.command_management import list_commands, rename_command
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.star import StarMetadata
 
+from .access import PermissionCheckedTool, QQToolPolicy
 from .integration import configure_provider
 from .provider import PROVIDER_ID
 from .runner import CodexRunner
@@ -48,6 +50,7 @@ class LocalCodex(Star):
     def __init__(self, context: Context, config: AstrBotConfig):
         super().__init__(context)
         self.config = config
+        self.tool_policy = QQToolPolicy(context, config)
         self.profiles = {}
         for profile in config.get("user_profiles", []):
             qq = str(profile.get("qq", "")).strip()
@@ -145,21 +148,16 @@ class LocalCodex(Star):
         instructions = "" if proactive_group else self._profile_instructions(event)
         if instructions:
             req.system_prompt = (req.system_prompt or "") + "\n" + instructions
-        # Only downloaded plugin tools belong to this QQ bridge. AstrBot's
-        # built-in file, shell, cron, and cross-chat messaging tools stay excluded.
+        # Public tools need an explicit reviewed allowlist. Never infer computer
+        # access from a message, nickname, group role, or a plugin's tool name.
         if req.func_tool:
-            plugin_roots = {
-                star.module_path.rsplit(".", 1)[0]
-                for star in self.context.get_all_stars()
-                if star.activated and not star.reserved and star.module_path
-            }
-            for tool in list(req.func_tool):
-                module = tool.handler_module_path or ""
-                if not any(
-                    module == root or module.startswith(root + ".")
-                    for root in plugin_roots
-                ):
-                    req.func_tool.remove_tool(tool.name)
+            req.func_tool = ToolSet(
+                tools=[
+                    PermissionCheckedTool(tool, self.tool_policy)
+                    for tool in req.func_tool
+                    if self.tool_policy.allows(event, tool)
+                ]
+            )
 
     @filter.on_plugin_loaded()
     async def configure_new_command(self, plugin: StarMetadata) -> None:

@@ -1,0 +1,87 @@
+"""Enforce QQ tool permissions using adapter identity, never message text."""
+
+from astrbot.api.event import AstrMessageEvent
+from astrbot.core.agent.tool import FunctionTool
+from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
+
+PUBLIC_PLUGIN_TOOLS = {
+    "astrbot_plugin_listen_music": {"find_music", "deliver_music", "search_music"},
+    "meme_manager": {"search_memes"},
+}
+
+
+class QQToolPolicy:
+    """Keep only reviewed public tools, with other plugin tools owner-only."""
+
+    def __init__(self, context, config: dict):
+        self.context = context
+        self.config = config
+
+    def allows(self, event: AstrMessageEvent, tool: FunctionTool) -> bool:
+        """Check the real sender and the installed plugin owning the tool.
+
+        Args:
+            event: Current adapter event, including the actual sender and group.
+            tool: Concrete tool about to be exposed or executed.
+
+        Returns:
+            Whether the tool belongs to this caller's permitted capabilities.
+        """
+        if event.get_platform_name() != "aiocqhttp" or not tool.active:
+            return False
+        owner = str(self.config.get("owner_qq", "")).strip()
+        sender = str(event.get_sender_id())
+        group = str(event.get_group_id())
+        target = str(self.config.get("group_qq", "")).strip()
+        owner_private = bool(owner) and sender == owner and not group
+        if not owner or not (owner_private or bool(target) and group == target):
+            return False
+        module = tool.handler_module_path or ""
+        for star in self.context.get_all_stars():
+            if not star.activated or star.reserved or not star.module_path:
+                continue
+            root = star.module_path.rsplit(".", 1)[0]
+            if module != root and not module.startswith(root + "."):
+                continue
+            plugin = root.rsplit(".", 1)[-1]
+            return owner_private or tool.name in PUBLIC_PLUGIN_TOOLS.get(plugin, set())
+        return False
+
+
+class PermissionCheckedTool(FunctionTool):
+    """Recheck identity at execution, including after tool hooks have run."""
+
+    def __init__(self, original: FunctionTool, policy: QQToolPolicy):
+        super().__init__(
+            name=original.name,
+            description=original.description,
+            parameters=original.parameters,
+            handler_module_path=original.handler_module_path,
+        )
+        self.original = original
+        self.policy = policy
+
+    async def call(self, context, **kwargs):
+        """Run the original tool only after the execution context is authorized.
+
+        Args:
+            context: AstrBot's execution context, carrying the current QQ event.
+            kwargs: Model-selected arguments for the original tool.
+
+        Yields:
+            Original tool output, retaining AstrBot's normal result handling.
+
+        Raises:
+            PermissionError: The caller lacks permission or the plugin was disabled.
+        """
+        event = context.context.event
+        if not self.policy.allows(event, self.original):
+            raise PermissionError("This QQ sender is not allowed to use this tool.")
+        if self.original.handler:
+            handler, method = self.original.handler, "decorator_handler"
+        elif type(self.original).call is not FunctionTool.call:
+            handler, method = self.original.call, "call"
+        else:
+            handler, method = self.original.run, "run"
+        async for result in call_local_llm_tool(context, handler, method, **kwargs):
+            yield result

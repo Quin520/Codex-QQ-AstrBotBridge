@@ -27,6 +27,7 @@ credentials*
 sessions.json
 sessions.tmp
 builtin-new-command.json
+settings-before-permissions.json
 last-run.jsonl
 last-error.log
 *.log

@@ -35,6 +35,11 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                     activated=True,
                 ),
                 SimpleNamespace(
+                    module_path="data.plugins.astrbot_plugin_listen_music.main",
+                    reserved=False,
+                    activated=True,
+                ),
+                SimpleNamespace(
                     module_path="data.plugins.disabled.main",
                     reserved=False,
                     activated=False,
@@ -139,6 +144,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         toolset = ToolSet()
         for name, module in [
             ("plugin_tool", "data.plugins.example.tools"),
+            ("find_music", "data.plugins.astrbot_plugin_listen_music.main"),
             ("shell_tool", "astrbot.core.tools.shell"),
             ("external_mcp", None),
             ("disabled_tool", "data.plugins.disabled.tools"),
@@ -160,7 +166,41 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("beginner", request.system_prompt)
         self.assertNotIn("Alpha", request.system_prompt)
         self.assertNotIn("brief", request.system_prompt)
-        self.assertEqual(request.func_tool.names(), ["plugin_tool"])
+        self.assertEqual(request.func_tool.names(), ["find_music"])
+        self.assertEqual(len(toolset.tools), 5)
+
+    async def test_owner_permission_config_disables_member_files_and_execution(self):
+        class Config(dict):
+            save_config_async = AsyncMock()
+
+        config = Config(deepcopy(DEFAULT_CONFIG))
+        config["admins_id"] = ["old-admin"]
+        original_runtime = config["provider_settings"]["computer_use_runtime"]
+        manager = SimpleNamespace(_mcp_init_task=None)
+        context = SimpleNamespace(get_config=lambda: config, provider_manager=manager)
+        settings = {**self.plugin.config, "enforce_owner_permissions": True}
+        await configure_provider(context, settings, self.root)
+        self.assertEqual(config["admins_id"], ["123"])
+        permissions = config["provider_settings"]["computer_use_local_permissions"]
+        self.assertEqual(
+            permissions["member"],
+            {
+                "allow_execution": False,
+                "allow_network": False,
+                "filesystem_scope": "none",
+            },
+        )
+        self.assertEqual(
+            config["provider_settings"]["computer_use_runtime"], original_runtime
+        )
+        backup = self.root / "settings-before-permissions.json"
+        self.assertEqual(
+            json.loads(backup.read_text(encoding="utf-8"))["admins_id"], ["old-admin"]
+        )
+        await configure_provider(context, settings, self.root)
+        self.assertEqual(
+            json.loads(backup.read_text(encoding="utf-8"))["admins_id"], ["old-admin"]
+        )
 
     async def test_profile_hook_blocks_model_requests_outside_allowlist(self):
         event = event_for("hi", "999", "987", "321")

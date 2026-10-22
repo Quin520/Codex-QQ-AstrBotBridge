@@ -81,6 +81,36 @@ async def configure_provider(context: Context, config: dict, data_dir: Path) -> 
     runner["config"]["model"]["provider_id"] = PROVIDER_ID
     global_config["platform_settings"]["unique_session"] = True
     global_config["provider_settings"]["show_tool_use_status"] = False
+    if config.get("enforce_owner_permissions", False):
+        owner = str(config.get("owner_qq", "")).strip()
+        if not owner.isdecimal():
+            raise ValueError("Set a valid owner QQ before enforcing permissions.")
+        settings = global_config["provider_settings"]
+        permissions_backup = data_dir / "settings-before-permissions.json"
+        if not permissions_backup.exists():
+            permissions_backup.write_text(
+                json.dumps(
+                    {
+                        "admins_id": global_config.get("admins_id", []),
+                        "computer_use_require_admin": settings.get(
+                            "computer_use_require_admin"
+                        ),
+                        "computer_use_local_permissions": settings.get(
+                            "computer_use_local_permissions"
+                        ),
+                    },
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+        global_config["admins_id"] = [owner]
+        settings["computer_use_require_admin"] = True
+        settings.setdefault("computer_use_local_permissions", {})["member"] = {
+            "allow_execution": False,
+            "allow_network": False,
+            "filesystem_scope": "none",
+        }
     await global_config.save_config_async()
     manager = context.provider_manager
     manager.providers_config = providers

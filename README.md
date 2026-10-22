@@ -79,6 +79,7 @@ https://github.com/Quin520/Codex-QQ-AstrBotBridge
 | `codex_exe` / 本机 Codex 程序路径 | 原生 `codex.exe` 的完整绝对路径，不是 `codex.cmd`、`codex.ps1` 或目录 |
 | `model` / Codex 模型 | 建议先留空，使用 CLI 内置默认模型；手动填写时使用当前账号可用的模型 ID |
 | `integrate_plugins` / 接入 AstrBot 插件和人格 | 需要使用其他 AI 插件时开启；自动创建并选用 `local_codex` 提供商，默认关闭以兼容旧版 |
+| `enforce_owner_permissions` / 仅本人可管理 AstrBot，禁止普通成员访问本机 | 可选，默认关闭；接入模式下将此实例管理员设为 `owner_qq`，普通成员本机文件范围设为 `none`，关闭其 Shell、Python 与执行网络权限。影响实例内其他机器人，启用前会备份原值 |
 | `fast_mode` / 默认启用 Codex Fast 模式 | 默认开启，关闭时请求 Standard 速度；不改变思考深度 |
 | `reasoning_effort` / Codex 推理等级 | 默认 `low`，还可选 `medium`、`high`、`xhigh`；需要所选模型支持 |
 | `max_parallel_requests` / 并发请求数 | 插件接入模式默认 2，范围 1–4；让聊天和自学习等后台请求可以同时运行 |
@@ -132,7 +133,7 @@ Fast 模式通过每次调用传入 `service_tier="fast"` 和 `features.fast_mod
 
 插件接入会把 AstrBot 实例的默认聊天模型设为 `local_codex`、开启群内按发送者隔离，并关闭工具状态提示；原值保存在桥接数据目录的 `settings-before-provider.json`。原直接模式的 Codex 历史不会导入，新聊天使用 AstrBot 自己的历史。关闭接入或卸载后，若需恢复原模型及会话设置，请在 AstrBot 配置中按备份恢复。
 
-只向 QQ 模型请求提供已启用的下载插件工具，不提供 AstrBot 内置的文件、Shell、定时任务和跨会话发送工具。下载插件仍有自身的能力和权限，应使用自己信任的插件。此桥接不是通用 API 服务，也不提供 Embedding、STT 或 TTS。
+群聊模型工具按下文“QQ 权限边界”中的名单开放；其他下载插件工具仅允许所有者私聊使用。不提供 AstrBot 内置的文件、Shell、定时任务和跨会话发送工具。下载插件仍有自身的能力和权限，应使用自己信任的插件。此桥接不是通用 API 服务，也不提供 Embedding、STT 或 TTS。
 
 ### 设置每个人的称呼与标签
 
@@ -164,6 +165,16 @@ AstrBot 自带一个 `/new`。为避免两个命令同时触发、以及普通�
 
 仓库只包含源码、空配置模板、文档和使用虚构身份的测试，不需要上传真实配置、聊天记录或登录文件。
 
+### QQ 权限边界
+
+v0.3.3 起，群聊只向模型开放已启用点歌插件的 `find_music`、`deliver_music`、`search_music`，以及表情包插件的 `search_memes`。工具名称与来源插件必须同时匹配；新安装的插件不会自动获得群聊模型工具权限。自学习和主动消息的已有事件流程仍由各自插件配置控制。
+
+其他下载插件的模型工具仅可由 `owner_qq` 的私聊使用，执行前会再次核对当前 QQ 身份及插件状态。群主、群管理员、昵称和消息中的身份声明不能获得此权限；所有者在群中发言也使用群聊工具范围。聊天身份依据 OneBot 事件，请保护 OneBot Token 并让连接端口仅供本机使用。
+
+CLI 的电脑、命令和本地文件相关工具仍关闭，AstrBot 内置文件、Shell、Python、跨会话发送、MCP 和子智能体工具也不会通过桥接开放。开启“仅本人可管理 AstrBot，禁止普通成员访问本机”会额外设置 AstrBot 的管理员和普通成员权限，**不会**启用 QQ 远程操作电脑。所有者的 Codex 桌面使用不受影响。
+
+这些是应用层权限，无法替代操作系统隔离：下载插件仍以 AstrBot 所在 Windows 账户运行，其命令处理器和事件钩子不属于模型工具校验范围。需要防范插件漏洞或恶意插件时，应将群聊实例放到独立虚拟机中，不共享项目目录、个人配置或宿主机剪贴板；“只读共享”仍然允许读取代码。另见 [AstrBot 本机能力说明](https://docs.astrbot.app/faq.html) 与 [Windows Sandbox 隔离及共享配置](https://learn.microsoft.com/en-us/windows/security/application-security/application-isolation/windows-sandbox/windows-sandbox-configure-using-wsb-file)。
+
 运行时数据主要位于 AstrBot 数据目录中：
 
 | 相对路径 | 内容 |
@@ -175,6 +186,7 @@ AstrBot 自带一个 `/new`。为避免两个命令同时触发、以及普通�
 | 同目录的 `workspace/` | 插件专用工作目录 |
 | 同目录的 `provider/` | 插件接入模式的最近一次调用日志、独立工作目录；临时请求及附件在调用结束时清理 |
 | 同目录的 `settings-before-provider.json` | 启用提供商前的默认模型、会话隔离与工具状态设置 |
+| 同目录的 `settings-before-permissions.json` | 首次启用权限限制前的管理员列表及本机工具权限，仅保存在本机 |
 
 Codex 自身管理登录数据。直接模式保留 CLI 会话；插件接入模式使用 `--ephemeral`，由 AstrBot 保存历史。QQ 中提交的文字、图片、当前用户偏好以及启用插件附加的上下文会传给已登录的 Codex 服务，回复会回到对应私聊或群聊。主动消息、自学习等插件可按自己的设置读取群历史；群聊回复对群成员可见。
 
@@ -210,7 +222,7 @@ Codex 自身管理登录数据。直接模式保留 CLI 会话；插件接入模
 
 ```powershell
 $env:PYTHONPATH = 'D:\Apps\AstrBot'
-python -m unittest tests.test_bridge tests.test_integration -v
+python -m unittest tests.test_bridge tests.test_integration tests.test_access -v
 ```
 
 将示例路径替换为自己的 AstrBot 源码位置，并确认 `python` 是该 AstrBot 环境的解释器。测试将 AstrBot 数据根目录指向临时目录，使用虚构 QQ 身份，不调用真实 Codex、不发送 QQ 消息、不修改运行中的配置。

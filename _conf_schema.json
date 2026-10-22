@@ -35,6 +35,12 @@
     "hint": "开启后请求 Fast 服务速度，不降低思考深度。会更快消耗订阅额度，实际可用性取决于当前模型和账号。关闭后请求 Standard 速度。",
     "default": true
   },
+  "enforce_owner_permissions": {
+    "type": "bool",
+    "description": "仅本人可管理 AstrBot，禁止普通成员访问本机",
+    "hint": "接入模式下，将此实例的管理员列表设为你的 QQ 号，禁止普通成员的本机文件访问、Shell 与 Python 执行。会影响该实例其他机器人；原值保存在本机备份中。此开关不会启用电脑操作工具。",
+    "default": false
+  },
   "reasoning_effort": {
     "type": "string",
     "description": "Codex 推理等级",
