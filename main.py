@@ -72,6 +72,7 @@ class LocalCodex(Star):
             max(30, min(600, int(config.get("timeout_seconds", 180)))),
             str(config.get("model", "")).strip(),
             fast_mode=bool(config.get("fast_mode", True)),
+            reasoning_effort=str(config.get("reasoning_effort", "low")),
         )
 
     async def initialize(self) -> None:
@@ -229,7 +230,9 @@ class LocalCodex(Star):
         """
         if self.config.get("integrate_plugins", False):
             accepted = self._accepts_event(event)
-            event.should_call_llm(accepted)
+            # AstrBot 4.29 stores a suppression flag despite this method's name:
+            # ProcessStage enters the default model pipeline when call_llm=False.
+            event.should_call_llm(not accepted)
             if accepted:
                 event.set_extra("selected_provider", PROVIDER_ID)
                 event.set_extra("enable_streaming", False)
@@ -263,7 +266,7 @@ class LocalCodex(Star):
             return
         parts = event.get_message_str().strip().split(maxsplit=1)
         if len(parts) != 2:
-            event.should_call_llm(False)
+            event.should_call_llm(True)
             yield event.plain_result("直接发文字即可聊天；群里请 @我。新对话：/new")
             event.stop_event()
             return
@@ -282,7 +285,7 @@ class LocalCodex(Star):
             event: An already authorized incoming message.
             prompt: Text to send to Codex.
         """
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         try:
             if self.lock.locked():
                 yield event.plain_result(
@@ -330,7 +333,7 @@ class LocalCodex(Star):
         """
         if not self._accepts_event(event):
             return
-        event.should_call_llm(False)
+        event.should_call_llm(True)
         try:
             if self.lock.locked():
                 yield event.plain_result("请等当前 Codex 请求完成后再重置对话。")

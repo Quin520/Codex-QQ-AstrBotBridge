@@ -35,6 +35,19 @@
     "hint": "开启后请求 Fast 服务速度，不降低思考深度。会更快消耗订阅额度，实际可用性取决于当前模型和账号。关闭后请求 Standard 速度。",
     "default": true
   },
+  "reasoning_effort": {
+    "type": "string",
+    "description": "Codex 推理等级",
+    "hint": "日常聊天建议 low；复杂分析可选 medium 或 high。与 Fast 服务速度独立，具体等级需模型支持。",
+    "options": ["low", "medium", "high", "xhigh"],
+    "default": "low"
+  },
+  "max_parallel_requests": {
+    "type": "int",
+    "description": "插件接入模式的并发请求数",
+    "hint": "默认 2，让聊天与自学习等后台调用可以同时进行；范围 1–4。设为 1 时所有调用排队。",
+    "default": 2
+  },
   "user_profiles": {
     "type": "template_list",
     "description": "按 QQ 号配置称呼与标签",

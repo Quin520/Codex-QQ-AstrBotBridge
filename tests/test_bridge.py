@@ -98,6 +98,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("read-only", argv)
             self.assertIn('service_tier="fast"', argv)
             self.assertIn("features.fast_mode=true", argv)
+            self.assertIn('model_reasoning_effort="low"', argv)
             for feature in ("shell_tool", "unified_exec", "apps", "plugins"):
                 self.assertEqual(argv[argv.index(feature) - 1], "--disable")
             turn.communicate.assert_awaited_once_with(prompt.encode("utf-8"))
@@ -182,7 +183,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             replies = [result async for result in plugin.codex(event)]
             self.assertEqual(len(replies), 1)
             self.assertTrue(event.is_stopped())
-            self.assertFalse(event.call_llm)
+            self.assertTrue(event.call_llm)
             self.assertEqual(list(plugin.sessions.values()), [THREAD])
             reset_event = AstrMessageEvent(
                 "codex_reset", message, event.platform_meta, "456"
@@ -209,7 +210,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 len([result async for result in self.plugin.chat(event)]), 1
             )
             self.assertTrue(event.is_stopped())
-            self.assertFalse(event.call_llm)
+        self.assertTrue(event.call_llm)
         self.assertEqual(
             self.plugin.runner.run.await_args_list[0].args, ("First question", None)
         )

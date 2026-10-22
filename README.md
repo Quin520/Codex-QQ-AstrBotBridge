@@ -17,7 +17,7 @@ QQ 普通账号 ⇄ NapCat ⇄ AstrBot / OneBot v11 ⇄ 本机 Codex CLI
 | 连续对话 | 按平台、聊天和发送者分别保存，私聊与群聊互不串联 |
 | 新会话 | 私聊 `/new`；群聊 `@机器人 /new` |
 | 输入输出 | 直接模式支持文本；插件接入模式还支持图片和插件工具；语音需另配 STT |
-| 并发 | 同一模式的 Codex 请求串行处理；插件接入模式排队，直接模式忙时提示重发 |
+| 并发 | 插件接入模式默认同时处理两个请求，超出后排队；直接模式一次一个，忙时提示重发 |
 | 个性化 | 按 QQ 号设置称呼与偏好标签，只注入当前发送者的配置 |
 | 回复速度 | 默认请求 Fast 模式，可关闭；不额外发送“稍等，我想一下” |
 | 平台 | Windows 原生运行，AstrBot 的 OneBot v11（`aiocqhttp`）适配器 |
@@ -80,6 +80,8 @@ https://github.com/Quin520/Codex-QQ-AstrBotBridge
 | `model` / Codex 模型 | 建议先留空，使用 CLI 内置默认模型；手动填写时使用当前账号可用的模型 ID |
 | `integrate_plugins` / 接入 AstrBot 插件和人格 | 需要使用其他 AI 插件时开启；自动创建并选用 `local_codex` 提供商，默认关闭以兼容旧版 |
 | `fast_mode` / 默认启用 Codex Fast 模式 | 默认开启，关闭时请求 Standard 速度；不改变思考深度 |
+| `reasoning_effort` / Codex 推理等级 | 默认 `low`，还可选 `medium`、`high`、`xhigh`；需要所选模型支持 |
+| `max_parallel_requests` / 并发请求数 | 插件接入模式默认 2，范围 1–4；让聊天和自学习等后台请求可以同时运行 |
 | `user_profiles` / 按 QQ 号配置称呼与标签 | 添加“QQ 用户”条目，填写 QQ 号、称呼和标签；默认没有个人资料 |
 | `timeout_seconds` / 超时 | 默认 180 秒，范围 30–600 秒 |
 
@@ -105,6 +107,8 @@ Get-ChildItem -LiteralPath $codexPackage -Filter codex.exe -Recurse |
 保存配置并重载插件。模型名称以当前账号在 Codex 中能使用的模型为准；不要填写“Pro”“ChatGPT”或套餐名称。插件使用 `--ignore-user-config`，不会读取个人 `config.toml` 中的模型和工具配置。
 
 Fast 模式通过每次调用传入 `service_tier="fast"` 和 `features.fast_mode=true` 请求，不改动个人 Codex 设置。支持情况取决于模型和账号；Fast 会更快消耗订阅额度，当前倍率见 [Codex 官方速度说明](https://learn.chatgpt.com/docs/agent-configuration/speed)。
+
+推理等级通过 `model_reasoning_effort` 单独配置，日常聊天建议 `low`，复杂分析时再选较高等级；它和 Fast 是两个独立参数。若模型本来就默认 `low`，显式选择 `low` 不会再次降低推理等级。后台插件会增加模型调用次数；默认并发 2 可减少排队，但不保证固定回复秒数，也不会增加账号额度。参数说明见 [Codex 官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
 
 ### 接入已下载的插件
 
@@ -191,6 +195,7 @@ Codex 自身管理登录数据。直接模式保留 CLI 会话；插件接入模
 | 额度不足、限流或请求失败 | 查看本地错误日志中的实际原因；订阅用量和服务限制仍然适用 |
 | 上下文异常 | 发送 `/new`，再重新提问 |
 | AI 插件没有生效 | 确认“接入 AstrBot 插件和人格”已开启，重启后存在 `local_codex`，插件本身启用并正确选择模型 |
+| v0.3.0 私聊只有自学习日志，没有正式回复 | 升级到 v0.3.1 并重启 AstrBot；旧版错误设置了 AstrBot 的默认模型请求抑制标志 |
 | 表情包没发出 | 检查图包实际包含图片并启用；只有空图包时模型接通也不会产生图片 |
 | 主动消息没发出 | 检查该插件是否启用、目标群会话是否正确、自动触发、静默时段、上下文和无人回应限制 |
 
@@ -207,7 +212,7 @@ python -m unittest tests.test_bridge tests.test_integration -v
 
 将示例路径替换为自己的 AstrBot 源码位置，并确认 `python` 是该 AstrBot 环境的解释器。测试将 AstrBot 数据根目录指向临时目录，使用虚构 QQ 身份，不调用真实 Codex、不发送 QQ 消息、不修改运行中的配置。
 
-回归测试覆盖访问范围、实际 @判断、会话隔离、新会话、命令保留、内置命令迁移、真实唤醒阶段、子进程参数与标准输入、Fast 开关、登录与超时、提供商真实装载/重载、工具参数校验、当前用户资料和主动消息范围。
+回归测试覆盖访问范围、实际 @判断、会话隔离、新会话、命令保留、内置命令迁移、真实唤醒/消息处理/回复阶段、子进程参数与标准输入、Fast 与推理参数、登录与超时、提供商真实装载/重载、并发及取消、工具参数校验、当前用户资料和主动消息范围。
 
 可选的真实 Codex 验证会发起三次模型请求，使用当前账号额度，但不会发送 QQ 消息：
 

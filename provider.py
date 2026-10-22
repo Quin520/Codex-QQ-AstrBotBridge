@@ -45,14 +45,11 @@ class LocalCodexProvider(Provider):
             StarTools.get_data_dir("astrbot_plugin_local_codex") / "provider"
         )
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        self.lock = asyncio.Lock()
-        self.runner = CodexRunner(
-            Path(provider_config.get("codex_exe", "")).expanduser(),
-            self.data_dir,
-            max(30, min(600, int(provider_config.get("timeout_seconds", 180)))),
-            "",
-            fast_mode=bool(provider_config.get("fast_mode", True)),
+        self.request_slots = asyncio.Semaphore(
+            max(1, min(4, int(provider_config.get("max_parallel_requests", 2))))
         )
+        self.active_requests: set[asyncio.Task] = set()
+        self.closed = False
 
     def get_current_key(self) -> str:
         """Return no API key; the CLI manages its own ChatGPT login."""
@@ -203,7 +200,9 @@ class LocalCodexProvider(Provider):
                 },
             },
         }
-        async with self.lock:
+        async with self.request_slots:
+            if self.closed:
+                raise RuntimeError("The local Codex provider has been unloaded.")
             with tempfile.TemporaryDirectory(
                 prefix="request-", dir=self.data_dir
             ) as temporary:
@@ -224,16 +223,42 @@ class LocalCodexProvider(Provider):
                 schema_path = directory / "response-schema.json"
                 schema_path.write_text(json.dumps(schema), encoding="utf-8")
                 selected_model = model or self.get_model()
-                self.runner.model = (
-                    "" if selected_model == "default" else selected_model
+                runner = CodexRunner(
+                    Path(self.provider_config.get("codex_exe", "")).expanduser(),
+                    directory,
+                    max(
+                        30,
+                        min(600, int(self.provider_config.get("timeout_seconds", 180))),
+                    ),
+                    "" if selected_model == "default" else selected_model,
+                    fast_mode=bool(self.provider_config.get("fast_mode", True)),
+                    reasoning_effort=str(
+                        self.provider_config.get("reasoning_effort", "low")
+                    ),
+                    workspace=self.data_dir / "workspace",
                 )
-                _, answer = await self.runner.run(
-                    INSTRUCTIONS + "\n" + json.dumps(request, ensure_ascii=False),
-                    None,
-                    output_schema=schema_path,
-                    images=attachments,
-                    ephemeral=True,
+                if self.closed:
+                    raise RuntimeError("The local Codex provider has been unloaded.")
+                task = asyncio.create_task(
+                    runner.run(
+                        INSTRUCTIONS + "\n" + json.dumps(request, ensure_ascii=False),
+                        None,
+                        output_schema=schema_path,
+                        images=attachments,
+                        ephemeral=True,
+                    )
                 )
+                self.active_requests.add(task)
+                try:
+                    _, answer = await task
+                finally:
+                    self.active_requests.discard(task)
+                    # Each in-flight request owns its process and output files.
+                    # Keep only the latest completed diagnostic log privately.
+                    for name in ("last-run.jsonl", "last-error.log"):
+                        source = directory / name
+                        if source.exists():
+                            source.replace(self.data_dir / name)
         payload = json.loads(answer)
         jsonschema.validate(payload, schema)
         calls = payload["tool_calls"]
@@ -261,8 +286,15 @@ class LocalCodexProvider(Provider):
         yield await self.text_chat(**kwargs)
 
     async def terminate(self) -> None:
-        """Stop the subprocess owned by this provider."""
-        await self.runner.stop()
+        """Stop owned subprocesses and prevent queued requests from starting."""
+        self.closed = True
+        tasks = list(self.active_requests)
+        for task in tasks:
+            task.cancel()
+        outcomes = await asyncio.gather(*tasks, return_exceptions=True)
+        for outcome in outcomes:
+            if isinstance(outcome, Exception):
+                raise outcome
 
 
 # AstrBot keeps adapter metadata across plugin reloads; refresh our class only.
@@ -283,5 +315,7 @@ else:
             "codex_exe": "",
             "timeout_seconds": 180,
             "fast_mode": True,
+            "reasoning_effort": "low",
+            "max_parallel_requests": 2,
         },
     )(LocalCodexProvider)

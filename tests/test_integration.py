@@ -1,5 +1,6 @@
 """Regression checks for AstrBot routing, personal profiles, and model tools."""
 
+import asyncio
 import json
 import sys
 import tempfile
@@ -63,14 +64,76 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
         event = event_for("hello", "999", "456", "321")
         self.assertEqual([reply async for reply in self.plugin.chat(event)], [])
         self.assertFalse(event.is_stopped())
-        self.assertTrue(event.call_llm)
+        self.assertFalse(event.call_llm)
         self.assertEqual(event.get_extra("selected_provider"), PROVIDER_ID)
 
     async def test_group_without_mention_does_not_enable_model(self):
         event = event_for("ordinary group text", "999", "456")
         self.assertEqual([reply async for reply in self.plugin.chat(event)], [])
-        self.assertFalse(event.call_llm)
+        self.assertTrue(event.call_llm)
         self.assertFalse(event.is_stopped())
+
+    async def test_real_process_stage_calls_model_and_reaches_reply_delivery(self):
+        from astrbot.core.pipeline.process_stage.stage import (
+            ProcessStage,
+            StarRequestSubStage,
+        )
+        from astrbot.core.pipeline.respond.stage import RespondStage
+        from astrbot.core.star.star import star_map
+
+        model = AsyncMock(return_value="Delivered answer")
+
+        class AgentStage:
+            async def process(self, event):
+                answer = await model(event.get_message_str())
+                event.set_result(event.plain_result(answer))
+                yield
+
+        config = deepcopy(DEFAULT_CONFIG)
+        config["platform_settings"]["segmented_reply"]["enable"] = False
+        context = SimpleNamespace(astrbot_config=config)
+        stage = ProcessStage()
+        stage.ctx = context
+        stage.star_request_sub_stage = StarRequestSubStage()
+        await stage.star_request_sub_stage.initialize(context)
+        stage.agent_sub_stage = AgentStage()
+        respond = RespondStage()
+        await respond.initialize(context)
+        module = LocalCodex.__module__
+        handler = SimpleNamespace(
+            handler_full_name=module + "_chat",
+            handler_module_path=module,
+            handler_name="chat",
+            handler=self.plugin.chat,
+        )
+        for sender, group, mention, expected in [
+            ("123", "", None, 1),
+            ("999", "456", "321", 1),
+            ("999", "456", None, 0),
+            ("999", "", None, 0),
+        ]:
+            with self.subTest(sender=sender, group=group, mention=mention):
+                model.reset_mock()
+                event = event_for("hello", sender, group, mention)
+                event.is_at_or_wake_command = True
+                event.send = AsyncMock()
+                event.set_extra("activated_handlers", [handler])
+                with (
+                    patch.dict(star_map, {module: SimpleNamespace(name="bridge")}),
+                    patch(
+                        "astrbot.core.pipeline.respond.stage.call_event_hook",
+                        new=AsyncMock(return_value=False),
+                    ),
+                ):
+                    async for _ in stage.process(event):
+                        await respond.process(event)
+                self.assertEqual(model.await_count, expected)
+                self.assertEqual(event.send.await_count, expected)
+                if expected:
+                    self.assertEqual(
+                        event.send.await_args.args[0].get_plain_text(),
+                        "Delivered answer",
+                    )
 
     async def test_only_current_sender_profile_and_plugin_tools_reach_model(self):
         toolset = ToolSet()
@@ -208,9 +271,14 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             self.provider = LocalCodexProvider(
                 {"codex_exe": sys.executable, "model": "default"}, {}
             )
-        self.provider.runner.run = AsyncMock(
+        self.run = AsyncMock(
             return_value=(THREAD, '{"answer":"Hello","tool_calls":[]}')
         )
+        runner_patch = patch(
+            "astrbot_plugin_local_codex.provider.CodexRunner.run", self.run
+        )
+        runner_patch.start()
+        self.addCleanup(runner_patch.stop)
         self.tool = FunctionTool(
             name="lookup",
             description="Look up a value",
@@ -232,7 +300,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             extra_user_content_parts=[TextPart(text="Learned user preferences")],
         )
         self.assertEqual(answer.completion_text, "Hello")
-        sent = self.provider.runner.run.await_args.args[0]
+        sent = self.run.await_args.args[0]
         for value in [
             "Persona",
             "Earlier answer",
@@ -241,15 +309,15 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
         ]:
             self.assertIn(value, sent)
         self.assertEqual(contexts, [{"role": "assistant", "content": "Earlier answer"}])
-        self.assertTrue(self.provider.runner.run.await_args.kwargs["ephemeral"])
-        self.assertIsNone(self.provider.runner.run.await_args.args[1])
+        self.assertTrue(self.run.await_args.kwargs["ephemeral"])
+        self.assertIsNone(self.run.await_args.args[1])
 
     async def test_validated_tool_call_is_returned_to_astrbot(self):
         payload = {
             "answer": "unwanted progress text",
             "tool_calls": [{"name": "lookup", "arguments_json": '{"key":"sample"}'}],
         }
-        self.provider.runner.run.return_value = (THREAD, json.dumps(payload))
+        self.run.return_value = (THREAD, json.dumps(payload))
         answer = await self.provider.text_chat(
             prompt="Find sample", func_tool=self.tools
         )
@@ -261,7 +329,7 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_unlisted_tools_and_invalid_arguments_are_rejected(self):
         for name, arguments in [("invented", "{}"), ("lookup", '{"key":1}')]:
-            self.provider.runner.run.return_value = (
+            self.run.return_value = (
                 THREAD,
                 json.dumps(
                     {
@@ -278,7 +346,77 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
     async def test_audio_is_not_silently_discarded(self):
         with self.assertRaisesRegex(ValueError, "STT"):
             await self.provider.text_chat(prompt="Listen", audio_urls=["example.wav"])
-        self.provider.runner.run.assert_not_awaited()
+        self.run.assert_not_awaited()
+
+    async def test_background_request_does_not_block_chat_and_concurrency_is_bounded(
+        self,
+    ):
+        entered = [asyncio.Event() for _ in range(3)]
+        release = [asyncio.Event() for _ in range(3)]
+        runners = []
+
+        async def run(runner, *args, **kwargs):
+            index = len(runners)
+            runners.append(runner)
+            entered[index].set()
+            await release[index].wait()
+            return THREAD, '{"answer":"Ready","tool_calls":[]}'
+
+        tasks = []
+        with patch("astrbot_plugin_local_codex.provider.CodexRunner.run", run):
+            try:
+                tasks.append(
+                    asyncio.create_task(self.provider.text_chat(prompt="Background"))
+                )
+                await asyncio.wait_for(entered[0].wait(), 1)
+                tasks.append(
+                    asyncio.create_task(self.provider.text_chat(prompt="Chat"))
+                )
+                await asyncio.wait_for(entered[1].wait(), 1)
+                tasks.append(
+                    asyncio.create_task(self.provider.text_chat(prompt="Queued"))
+                )
+                await asyncio.sleep(0)
+                self.assertFalse(entered[2].is_set())
+                self.assertIsNot(runners[0], runners[1])
+                self.assertNotEqual(runners[0].data_dir, runners[1].data_dir)
+                self.assertEqual(runners[0].workspace, runners[1].workspace)
+                release[1].set()
+                reply = await asyncio.wait_for(tasks[1], 1)
+                self.assertEqual(reply.completion_text, "Ready")
+                self.assertFalse(tasks[0].done())
+                await asyncio.wait_for(entered[2].wait(), 1)
+                release[0].set()
+                release[2].set()
+                await asyncio.gather(*tasks)
+            finally:
+                for gate in release:
+                    gate.set()
+                await asyncio.gather(*tasks, return_exceptions=True)
+        self.assertFalse(self.provider.active_requests)
+
+    async def test_unload_cancels_active_requests_and_rejects_queued_work(self):
+        self.provider.request_slots = asyncio.Semaphore(1)
+        started = asyncio.Event()
+        cleaned = asyncio.Event()
+
+        async def run(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Future()
+            finally:
+                cleaned.set()
+
+        self.run.side_effect = run
+        active = asyncio.create_task(self.provider.text_chat(prompt="Active"))
+        await asyncio.wait_for(started.wait(), 1)
+        queued = asyncio.create_task(self.provider.text_chat(prompt="Queued"))
+        await self.provider.terminate()
+        outcomes = await asyncio.gather(active, queued, return_exceptions=True)
+        self.assertIsInstance(outcomes[0], asyncio.CancelledError)
+        self.assertIsInstance(outcomes[1], RuntimeError)
+        self.assertTrue(cleaned.is_set())
+        self.assertEqual(self.run.await_count, 1)
 
 
 if __name__ == "__main__":

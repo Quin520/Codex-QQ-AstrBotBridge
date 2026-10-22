@@ -55,12 +55,19 @@ class CodexRunner:
         timeout: int,
         model: str,
         fast_mode: bool = True,
+        reasoning_effort: str = "low",
+        *,
+        workspace: Path | None = None,
     ):
         self.executable = executable
         self.data_dir = data_dir
         self.timeout = timeout
         self.model = model
         self.fast_mode = fast_mode
+        if reasoning_effort not in {"low", "medium", "high", "xhigh"}:
+            raise ValueError("Reasoning effort must be low, medium, high, or xhigh.")
+        self.reasoning_effort = reasoning_effort
+        self.workspace = workspace or data_dir / "workspace"
         self.process = None
 
     async def stop(self) -> None:
@@ -110,7 +117,7 @@ class CodexRunner:
             raise RuntimeError("Configure the absolute path to the native codex.exe.")
         if thread_id:
             uuid.UUID(thread_id)
-        workspace = self.data_dir / "workspace"
+        workspace = self.workspace
         workspace.mkdir(parents=True, exist_ok=True)
         env = os.environ.copy()
         for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"):
@@ -179,6 +186,8 @@ class CodexRunner:
                 'service_tier="fast"' if self.fast_mode else 'service_tier="default"',
                 "-c",
                 "features.fast_mode=true",
+                "-c",
+                f'model_reasoning_effort="{self.reasoning_effort}"',
             ]
         )
         if output_schema:

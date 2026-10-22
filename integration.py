@@ -32,6 +32,8 @@ async def configure_provider(context: Context, config: dict, data_dir: Path) -> 
         "codex_exe": str(config.get("codex_exe", "")),
         "timeout_seconds": int(config.get("timeout_seconds", 180)),
         "fast_mode": bool(config.get("fast_mode", True)),
+        "reasoning_effort": str(config.get("reasoning_effort", "low")),
+        "max_parallel_requests": int(config.get("max_parallel_requests", 2)),
         "modalities": ["text", "image", "tool_use"],
     }
     providers = global_config["provider"]
