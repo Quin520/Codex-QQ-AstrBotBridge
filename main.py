@@ -16,6 +16,7 @@ from astrbot.core.star.star import StarMetadata
 
 from .access import PermissionCheckedTool, QQToolPolicy
 from .integration import configure_provider
+from .profiles import profile_instructions
 from .provider import PROVIDER_ID
 from .runner import CodexRunner
 
@@ -58,8 +59,9 @@ class LocalCodex(Star):
                 continue
             if qq in self.profiles:
                 raise ValueError("Each QQ account may have only one user profile.")
-            if not isinstance(profile.get("tags", []), list):
-                raise TypeError("User profile tags must be a list.")
+            for key in ("tags", "boundaries"):
+                if not isinstance(profile.get(key, []), list):
+                    raise TypeError(f"User profile {key} must be a list.")
             self.profiles[qq] = profile
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_local_codex")
         self.session_file = self.data_dir / "sessions.json"
@@ -103,14 +105,8 @@ class LocalCodex(Star):
         profile = self.profiles.get(str(event.get_sender_id()))
         if not profile:
             return ""
-        preferences = {
-            "称呼": str(profile.get("nickname", "")).strip(),
-            "标签": profile.get("tags", []),
-        }
-        return (
-            "当前发送者的称呼与偏好如下。自然地使用称呼，按标签调整回答；"
-            "不必每次点名，不要主动复述标签，也不要把这些偏好套到其他人身上。\n"
-            + json.dumps(preferences, ensure_ascii=False)
+        return profile_instructions(
+            profile, self.config.get("relationship_presets", {})
         )
 
     @filter.on_llm_request(priority=-100000)

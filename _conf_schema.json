@@ -60,18 +60,115 @@
     "hint": "默认 2，让聊天与自学习等后台调用可以同时进行；范围 1–4。设为 1 时所有调用排队。",
     "default": 2
   },
+  "relationship_presets": {
+    "type": "object",
+    "description": "关系预设（可编辑）",
+    "hint": "修改后应用于选用该关系、且没有填写专属描述的成员。只调整相处方式，不改变权限。",
+    "items": {
+      "intimate": {
+        "type": "text",
+        "description": "亲密",
+        "default": "亲近熟悉，语气放松温暖，可以自然关心、接梗和表达偏好，不必客套或每次点名。对方认真求助时认真回应，情绪低落时先倾听；尊重明确表达的边界。不默认恋爱关系，不编造共同经历。"
+      },
+      "friend": {
+        "type": "text",
+        "description": "朋友",
+        "default": "像熟悉的朋友一样平等相处，轻松直接，可以分享看法、接梗和温和地表达不同意见。关心适度，不刻意讨好，不强行亲昵；正事认真回答。玩笑程度服从此人的单独设置。"
+      },
+      "disliked": {
+        "type": "text",
+        "description": "讨厌",
+        "default": "保持距离，语气冷淡克制，回复简洁，不主动套近乎、献殷勤或使用亲昵称呼。对方正常问事时仍就事论事、准确回答；可以表达不赞同，不辱骂、羞辱或翻旧账，不为了表现讨厌而编造指责。"
+      },
+      "unfamiliar": {
+        "type": "text",
+        "description": "不熟悉",
+        "default": "自然礼貌地交流，保持适当距离，不装熟、不擅自起亲昵称呼，不默认对方接受互怼。直接回应当前话题，不过度追问私人情况；熟悉程度依据实际互动，不编造共同经历。"
+      }
+    }
+  },
   "user_profiles": {
     "type": "template_list",
-    "description": "按 QQ 号配置称呼与标签",
-    "hint": "每个 QQ 号添加一条。只向模型提供当前发送者的配置；这里只设置偏好，不改变访问权限。保存后重载插件。",
+    "description": "按 QQ 号配置称呼与相处方式",
+    "hint": "展开成员后选择关系、语气和回复习惯，也可填写专属描述。沿用人格表示不额外指定；原有称呼和标签保留。保存时 AstrBot 自动重载插件。",
     "default": [],
     "templates": {
       "person": {
         "name": "QQ 用户",
+        "display_item": "nickname",
         "items": {
           "qq": {"type": "string", "description": "QQ 号", "default": ""},
           "nickname": {"type": "string", "description": "希望机器人使用的称呼", "default": ""},
-          "tags": {"type": "list", "description": "偏好标签", "hint": "例如：喜欢简短回答、编程初学者、喜欢轻松语气。每项填写一个标签。", "default": []}
+          "relationship": {
+            "type": "string",
+            "description": "关系",
+            "hint": "四种关系的描述可在上方“关系预设”中修改。需要只对这个人生效时，填写下方专属描述。",
+            "options": ["沿用人格", "亲密", "朋友", "讨厌", "不熟悉", "自定义"],
+            "default": "沿用人格"
+          },
+          "relationship_description": {
+            "type": "text",
+            "description": "这个人的专属相处描述",
+            "hint": "留空使用所选关系预设；填写后替代该预设，只影响这个人。例如：相熟的损友，平时接梗，认真求助时停止调侃。选择“自定义”时在这里描述。",
+            "default": ""
+          },
+          "reply_tone": {
+            "type": "string",
+            "description": "日常语气",
+            "options": ["沿用人格", "自然口语，少套话，不固定反问", "温柔耐心", "活泼俏皮", "简洁直接", "冷静理性"],
+            "default": "沿用人格"
+          },
+          "reply_length": {
+            "type": "string",
+            "description": "日常回复长度",
+            "hint": "只是默认习惯；对方明确要求详细解释时按实际需求回答。",
+            "options": ["沿用人格", "简短，通常 1–3 句", "适中，按需展开", "详细，解释清楚"],
+            "default": "沿用人格"
+          },
+          "teasing": {
+            "type": "string",
+            "description": "玩笑程度",
+            "options": ["沿用人格", "不开玩笑、不互怼", "轻松接梗，不拿本人开涮", "允许轻度互怼，认真时停止"],
+            "default": "沿用人格"
+          },
+          "serious_response": {
+            "type": "string",
+            "description": "认真求助时",
+            "options": ["沿用人格", "先给结论，再按需解释", "分步骤一起解决", "需求不明确时先问清楚"],
+            "default": "沿用人格"
+          },
+          "upset_response": {
+            "type": "string",
+            "description": "情绪低落时",
+            "options": ["沿用人格", "先倾听，不急着给建议", "先安慰，再一起想办法", "少说安慰套话，提供可行建议"],
+            "default": "沿用人格"
+          },
+          "boundaries": {
+            "type": "list",
+            "description": "不用于玩笑的话题（多选）",
+            "hint": "即使允许互怼，也不拿选中的话题开玩笑。其他边界可写在下方自定义相处规则中。",
+            "options": ["外貌", "年龄", "收入与工作", "感情经历", "家庭", "身体与健康"],
+            "default": []
+          },
+          "custom_instructions": {
+            "type": "text",
+            "description": "自定义相处规则",
+            "hint": "补充或调整上面的选项，只对这个人应用。例如：偶尔叫昵称；不催睡觉；只调侃拖延，不调侃工作能力。明确边界始终优先于玩笑设置。",
+            "default": ""
+          },
+          "shared_memories": {
+            "type": "text",
+            "description": "已确认的共同经历与偏好",
+            "hint": "只填写实际发生或对方明确说过的内容。需要更新或删除时直接编辑此处；不会自动写入，也不会套到其他人身上。",
+            "default": ""
+          },
+          "response_examples": {
+            "type": "text",
+            "description": "回复风格示例",
+            "hint": "例如：对方说“又把代码写炸了”；理想回复“今天又是哪位函数受害了，报错贴来看看。”示例用于学习语气，不当成真实经历，不照搬到每次回复。",
+            "default": ""
+          },
+          "tags": {"type": "list", "description": "偏好标签（保留原设置）", "hint": "例如：编程初学者、喜欢科幻。每项填写一个标签；明确的专属相处规则优先于笼统标签。", "default": []}
         }
       }
     }
