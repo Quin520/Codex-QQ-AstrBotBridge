@@ -25,6 +25,7 @@ from .profile_learning import ProfileLearner
 from .profile_reviews import ProfileReviewStore
 from .profiles import profile_instructions
 from .provider import PROVIDER_ID
+from .roleplay import roleplay_instructions
 from .runner import CodexRunner
 from .singing import SingingService
 from .video_context import VideoContext, VideoContextError, apply_summary
@@ -198,6 +199,9 @@ class LocalCodex(Star):
         req.system_prompt = (req.system_prompt or "") + self.group_context.instructions(
             event, proactive=proactive_group
         )
+        req.system_prompt += roleplay_instructions(
+            self.config, proactive=proactive_group
+        )
         if self.config.get("voice_enabled", False):
             req.system_prompt += (
                 "\n语音能力：用户要求语音祝福、说给他听或语音回复时，使用 send_voice。"
@@ -220,7 +224,8 @@ class LocalCodex(Star):
         if self.config.get("singing_enabled", False):
             req.system_prompt += (
                 "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_cover_music，"
-                "再将本次候选的 search_id、position 交给 sing_cover。普通点歌仍用 deliver_music。"
+                "再将本次候选的 search_id、position 交给 sing_cover。"
+                "普通点歌优先用已提供的 play_song_by_name（默认平台），没有该工具时用 deliver_music。"
                 "find_cover_music 会在允许时尝试备用点歌音源；不要用播放原曲的工具代替翻唱。"
                 "用户给了 B 站链接或 BV/AV 时，find_cover_music 的 title 直接填写该链接或编号，"
                 "不要把确切链接改成模糊歌名再搜索。接口受限不代表音源不存在，应如实说明。"
@@ -416,6 +421,7 @@ class LocalCodex(Star):
                     if anchor:
                         instructions = anchor + "\n" + instructions
                     instructions += self.group_context.instructions(event)
+                    instructions += roleplay_instructions(self.config)
                     if instructions:
                         prompt = instructions + "\n用户消息：\n" + prompt
                     thread_id, answer = await self.runner.run(

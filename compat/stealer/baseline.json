@@ -1,0 +1,20 @@
+{
+  "plugin": "astrbot_plugin_stealer",
+  "version": "3.1.6",
+  "bridge_version": "v0.3.14",
+  "hash_algorithm": "sha256",
+  "files": {
+    "core/events/meme_sender_engine.py": {
+      "before": "550022588c6faeddd006dd19b8fc6581f25563c6d4a2e8e24b0bba1b2281951d",
+      "after": "ddd7d85cfc71dbf66a1c8321d4e08fa900cd2822f26fb4a14e44598228b798e4"
+    },
+    "main.py": {
+      "before": "8c540d988fd6f59b06171701b0b35d73ed59752b15abac3d4113ee0d6285b606",
+      "after": "3fc302e36ea0b2ae109ad3273fb51976c8c1b1a98ad5fc570a20d577d636e8db"
+    },
+    "tests/test_bridge_meme_coexistence.py": {
+      "before": null,
+      "after": "039c3e5dc15d503b6efb97af13f75b0d5083eec7d6669596ca12db8c88dbd4a4"
+    }
+  }
+}

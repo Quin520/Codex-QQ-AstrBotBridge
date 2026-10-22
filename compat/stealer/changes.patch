@@ -1,0 +1,255 @@
+--- a/core/events/meme_sender_engine.py
++++ b/core/events/meme_sender_engine.py
+@@ -133,6 +133,7 @@
+             "stealer_auto_emoji_turn_decided",
+             "stealer_auto_emoji_turn_allowed",
+             "stealer_auto_emoji_turn_claimed",
++            "stealer_other_meme_selected",
+         ):
+             try:
+                 event.set_extra(key, False)
+@@ -196,8 +197,34 @@
+         if state.is_auto_claimed():
+             self.cancel_pending_auto_emoji(event, reason="reply_source_changed")
+ 
++    def has_other_meme_selection(self, event: AstrMessageEvent) -> bool:
++        """Reserve passive delivery for a meme already selected by Meme Manager.
++
++        Args:
++            event: Current reply event and its trusted plugin-generated extras.
++
++        Returns:
++            Whether Meme Manager selected an image for this turn. Keep a local
++            marker because its after-send hook clears its pending image list.
++        """
++        if event.get_extra("stealer_other_meme_selected"):
++            return True
++        selected = bool(
++            event.get_extra("meme_manager_pending_images")
++            or event.get_extra("meme_manager_semantic_selected_ids")
++            or (
++                event.get_extra("meme_manager_legacy_probability_hit") is True
++                and event.get_extra("found_emotions")
++            )
++        )
++        if selected:
++            event.set_extra("stealer_other_meme_selected", True)
++        return selected
++
+     def is_auto_emoji_source_current(self, event: AstrMessageEvent, text: str) -> bool:
+         """在异步分析和发送边界复核本轮回复的来源。"""
++        if self.has_other_meme_selection(event):
++            return False
+         state = self.emoji_turn_state(event)
+         if state.get_llm_reply() != text or self.is_command_event(event):
+             return False
+--- a/main.py
++++ b/main.py
+@@ -788,6 +788,8 @@
+         normalized_text = str(text or "").strip()
+         if not normalized_text or self._emoji_sender_engine.is_command_event(event):
+             return False
++        if self._emoji_sender_engine.has_other_meme_selection(event):
++            return False
+         turn_state = self._emoji_sender_engine.emoji_turn_state(event)
+         if turn_state.is_active_sent():
+             return False
+--- /dev/null
++++ b/tests/test_bridge_meme_coexistence.py
+@@ -0,0 +1,196 @@
++"""Run installed Meme Manager hooks against the staged stealer compatibility fix."""
++
++import atexit
++import asyncio
++import importlib
++import importlib.util
++import os
++import sys
++import tempfile
++import types
++import unittest
++from pathlib import Path
++from unittest.mock import AsyncMock
++
++ROOT = Path(__file__).resolve().parents[1]
++CORE = Path(os.environ.get("ASTRBOT_CORE", ROOT.parents[2]))
++MANAGER = Path(os.environ.get("MEME_MANAGER_PLUGIN", CORE / "data/plugins/meme_manager"))
++RUNTIME = tempfile.TemporaryDirectory()
++atexit.register(RUNTIME.cleanup)
++os.environ["ASTRBOT_ROOT"] = RUNTIME.name
++sys.path.insert(0, str(CORE))
++for name, paths in {
++    "astrbot_plugin_meme_manager": [MANAGER],
++    "astrbot_plugin_stealer": [
++        ROOT,
++        CORE / "data/plugins/astrbot_plugin_stealer",
++    ],
++}.items():
++    package = types.ModuleType(name)
++    package.__path__ = [str(path) for path in paths]
++    sys.modules[name] = package
++
++importlib.import_module("astrbot_plugin_stealer.core.events")
++name = "astrbot_plugin_stealer.core.events.meme_sender_engine"
++spec = importlib.util.spec_from_file_location(
++    name, ROOT / "core/events/meme_sender_engine.py"
++)
++engine_module = importlib.util.module_from_spec(spec)
++sys.modules[name] = engine_module
++spec.loader.exec_module(engine_module)
++manager_module = importlib.import_module("astrbot_plugin_meme_manager.main")
++stealer_module = importlib.import_module("astrbot_plugin_stealer.main")
++
++from astrbot.api.provider import LLMResponse
++from astrbot.core.message.components import Image, Plain
++from astrbot.core.message.message_event_result import MessageEventResult, ResultContentType
++from PIL import Image as PillowImage
++
++
++class CoexistenceTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        root = Path(self.directory.name)
++        (root / "happy").mkdir()
++        self.image_path = root / "happy/meme.png"
++        PillowImage.new("RGB", (2, 2)).save(self.image_path)
++        sender = object.__new__(manager_module.MemeSender)
++        self.sender = sender
++        sender.config = {
++            "generation": {
++                "markup": {"enable_alternative": False, "enable_repeated_detection": False},
++                "matching": {"enable_loose_matching": False},
++            }
++        }
++        sender.category_mapping = {"happy": "Happy"}
++        sender.trigger_scope = "only_chat_llm"
++        sender.emotions_probability = 100
++        sender.emotion_llm_enabled = False
++        sender.remove_invalid_alternative_markup = False
++        sender.convert_static_to_gif = False
++        sender.enable_mixed_message = False
++        sender.mixed_message_probability = 100
++        sender.send_image_as_base64 = False
++        sender.streaming_compatibility = True
++        sender.content_cleanup_rule = r"&&[a-zA-Z]*&&"
++        sender._semantic_mode_active = lambda event: False
++        sender._resolve_runtime_pack_context = lambda **kwargs: {
++            "category_mapping": sender.category_mapping, "pack_dir": root
++        }
++        sender._get_runtime_memes_dir_for_event = lambda event: root
++        sender._send_meme_image = AsyncMock()
++        self.state = {"meme_manager_llm_request_origin": "chat"}
++        self.event = types.SimpleNamespace(
++            unified_msg_origin="test:GroupMessage:456_999",
++            get_extra=lambda key: self.state.get(key),
++            set_extra=lambda key, value: self.state.update({key: value}),
++            get_result=lambda: self.state.get("result"),
++            get_platform_name=lambda: "test",
++            get_message_str=lambda: "That was funny",
++        )
++        self.stealer = object.__new__(stealer_module.Main)
++        self.stealer.plugin_config = types.SimpleNamespace(
++            enable_jev=False, enable_natural_emotion_analysis=False
++        )
++        self.engine = engine_module.MemeSenderEngine(self.stealer)
++        self.stealer._emoji_sender_engine = self.engine
++        self.engine.should_skip_auto_emoji_by_gate = lambda text: False
++        self.engine._resolve_with_log = AsyncMock(return_value=True)
++        self.engine.emoji_turn_state(self.event).set_auto_decision(True, "test-hit")
++        self.engine.get_meme_send_delay = lambda *args: 0
++        self.engine.try_send_emoji = AsyncMock(return_value=True)
++        self.tasks = []
++
++        def schedule(coro, **kwargs):
++            task = asyncio.create_task(coro)
++            self.tasks.append(task)
++            return task
++
++        self.stealer._safe_create_task = schedule
++
++    async def run_response(self, text, streaming=False):
++        response = LLMResponse(role="assistant", completion_text=text)
++        await self.sender._resp_impl(self.event, response)
++        scheduled = await self.stealer._prepare_emoji_after_llm(self.event, response)
++        self.state["result"] = MessageEventResult(
++            chain=[Plain(response.completion_text)],
++            result_content_type=ResultContentType.STREAMING_FINISH
++            if streaming else ResultContentType.LLM_RESULT,
++        )
++        await self.sender._on_decorating_result_impl(self.event)
++        await self.stealer._prepare_emoji_response(self.event)
++        await self.sender._after_message_sent_impl(self.event)
++        if self.tasks:
++            await asyncio.gather(*self.tasks)
++        return scheduled
++
++    async def test_manager_selection_prevents_duplicate_normal_response(self):
++        self.assertFalse(await self.run_response("Haha! &&happy&&"))
++        self.assertEqual(self.sender._send_meme_image.await_count, 1)
++        self.engine.try_send_emoji.assert_not_awaited()
++
++    async def test_manager_selection_prevents_duplicate_streaming_response(self):
++        self.assertFalse(await self.run_response("Haha! &&happy&&", streaming=True))
++        self.assertEqual(self.sender._send_meme_image.await_count, 1)
++        self.engine.try_send_emoji.assert_not_awaited()
++
++    async def test_no_manager_selection_retains_stealer(self):
++        self.assertTrue(await self.run_response("Haha!"))
++        self.sender._send_meme_image.assert_not_awaited()
++        self.engine.try_send_emoji.assert_awaited_once()
++
++    async def test_manager_probability_miss_retains_stealer(self):
++        self.sender.emotions_probability = 0
++        self.assertTrue(await self.run_response("Haha! &&happy&&"))
++        self.sender._send_meme_image.assert_not_awaited()
++        self.engine.try_send_emoji.assert_awaited_once()
++
++    async def test_invalid_category_retains_stealer(self):
++        self.assertTrue(await self.run_response("Haha! &&unknown&&"))
++        self.sender._send_meme_image.assert_not_awaited()
++        self.engine.try_send_emoji.assert_awaited_once()
++
++    async def test_delayed_send_rechecks_selection_and_remembers_cleared_pending(self):
++        self.engine.get_meme_send_delay = lambda *args: 0.05
++        response = LLMResponse(role="assistant", completion_text="Haha!")
++        self.assertTrue(await self.stealer._prepare_emoji_after_llm(self.event, response))
++        self.state["result"] = MessageEventResult(
++            chain=[Plain("Haha!")], result_content_type=ResultContentType.LLM_RESULT
++        )
++        await asyncio.sleep(0.01)
++        self.state["meme_manager_pending_images"] = [Image.fromFileSystem(str(self.image_path))]
++        await self.stealer._prepare_emoji_response(self.event)
++        self.state["meme_manager_pending_images"] = None
++        await asyncio.gather(*self.tasks)
++        self.engine.try_send_emoji.assert_not_awaited()
++
++    def test_semantic_selection_and_turn_reset(self):
++        self.state["meme_manager_semantic_selected_ids"] = ["pack:test-item"]
++        self.assertTrue(self.engine.has_other_meme_selection(self.event))
++        self.state["meme_manager_semantic_selected_ids"] = None
++        self.assertTrue(self.engine.has_other_meme_selection(self.event))
++        self.engine.reset_turn_state(self.event)
++        self.assertFalse(self.engine.has_other_meme_selection(self.event))
++
++    async def test_explicit_tool_send_is_not_disabled_by_passive_coordination(self):
++        self.state["stealer_other_meme_selected"] = True
++        self.stealer.is_send_enabled_for_event = lambda event: True
++        self.stealer.meme_selector = types.SimpleNamespace(
++            is_path_allowed_for_event=lambda path, event: True,
++            send_emoji_message=AsyncMock(return_value="image"),
++            record_emoji_usage=AsyncMock(),
++        )
++        self.engine.emoji_turn_state(self.event).set_candidates([
++            {"path": str(self.image_path), "desc": "test image", "emotion": "happy"}
++        ])
++        result = [value async for value in self.stealer._send_meme_impl(self.event, 1)]
++        self.assertTrue(result)
++        self.stealer.meme_selector.send_emoji_message.assert_awaited_once()
++
++
++if __name__ == "__main__":
++    try:
++        unittest.main()
++    finally:
++        RUNTIME.cleanup()

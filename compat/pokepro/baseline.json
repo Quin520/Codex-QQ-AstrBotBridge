@@ -1,0 +1,37 @@
+{
+  "plugin": "astrbot_plugin_pokepro",
+  "version": "v2.1.1",
+  "changes": [
+    {
+      "file": "core/scheduler.py",
+      "before_sha256": "6eacd978c2a19b42f08cafe30253628a7bad3cc3214bd400cb277a22c7532bf6",
+      "after_sha256": "f0f630516d47b14f31f8bd1849a79bffb1d768b896a250f928e861f6fe9bfa55"
+    },
+    {
+      "file": "core/on_poke.py",
+      "before_sha256": "fbc061d5d1c4239d9b24c815e49643e0584b5fe999d1dab8a5e5a92f49cd438a",
+      "after_sha256": "88c9b6a33d61d78ee279c22a7653a6741186014b8445d978eec3f1e4eb762ca3"
+    },
+    {
+      "file": "core/send_poke.py",
+      "before_sha256": "d932e6a6123f5394865620ba7eb21c67717150d539c67eb3d5448c428b281f23",
+      "after_sha256": "044abc007e1489d4473a856a930ebde13e8d8cb10afd4a78e46c8be5b92adead"
+    },
+    {
+      "file": "main.py",
+      "before_sha256": "be73d614440b7d1ceb908fa3ba2d585659dc3a84c2d0879534061e176a3e2e06",
+      "after_sha256": "17fbe03ba3a82ab9ab1f5d52125b255cb9a18a803c241762d6df3d9ee3044ca5"
+    }
+  ],
+  "new_files": [
+    "tests/test_scheduler.py",
+    "tests/test_delivery_and_commands.py"
+  ],
+  "validation": {
+    "scheduler_before": "3 tests: 2 failed; six-digit target produced 6 calls, two targets x2 produced 24 instead of 4",
+    "after": "12 tests passed; real scheduler/PokeSender with fake QQ API; real command registry, session filtering, WakingCheckStage permission denial; missing command yields existing poke LLM prompt; failures and partial delivery counted accurately"
+  },
+  "line_endings": "UTF8 LF/no BOM preserved",
+  "runtime": "No live config changes, no restart, no QQ send",
+  "ruff": "changed source + new tests E/F clean; formatting clean; new tests full ruff clean; pre-existing upstream broad-exception/import issues retained"
+}

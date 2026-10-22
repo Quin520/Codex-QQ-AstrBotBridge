@@ -1,0 +1,22 @@
+{
+  "core/plugin_lifecycle.py": {
+    "before": "dc094b2b8423ed0ed22d50399af5f06611319f432282df96718385b9c8e08fda",
+    "after": "8a0ef1fe70ab05c17bb31cde5f2cc10fb7186473d9bfa10fa239a4f00a6c6044"
+  },
+  "services/hooks/llm_hook_handler.py": {
+    "before": "c6b86be3d960eae906dc5fc67b14d6b98681722fd4eea9fdc5ed42172d56d9f4",
+    "after": "f211e394426c66b7cf0901a73a0b408c517b04c41810c81000e668e3bb083fde"
+  },
+  "services/response/response_diversity_manager.py": {
+    "before": "f5945a372b1fb5fd83ab46e73700dd854bf7883f9ab52a7fcecd1bb51b412592",
+    "after": "5ecedc04d4ae102d909e2a4a6834ee7878ca8755ffaae6ffac7f818781ea8392"
+  },
+  "tests/test_bridge_proactive_social.py": {
+    "before": null,
+    "after": "4b0008e9a8a2af4f4c0c204816fffed4a7b7a6e463387485673291b52a63da0b"
+  },
+  "tests/test_bridge_natural_style.py": {
+    "before": null,
+    "after": "a41304edb2ec1918428ad79338d0c556ed46725ef042d4e04ee70814346bce6f"
+  }
+}

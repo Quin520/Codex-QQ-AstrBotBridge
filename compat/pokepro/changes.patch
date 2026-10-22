@@ -1,0 +1,429 @@
+--- a/core/scheduler.py
++++ b/core/scheduler.py
+@@ -70,7 +70,7 @@
+             gid, uid = target
+             await self.sender.client_send(
+                 client=self.client,
+-                target_ids=uid,
++                target_ids=[uid],
+                 group_id=gid,
+                 times=self.cfg.times,
+             )
+--- a/core/on_poke.py
++++ b/core/on_poke.py
+@@ -8,6 +8,11 @@
+     AiocqhttpMessageEvent,
+ )
+ from astrbot.core.star.context import Context
++from astrbot.core.star.filter.command import CommandFilter
++from astrbot.core.star.filter.command_group import CommandGroupFilter
++from astrbot.core.star.filter.regex import RegexFilter
++from astrbot.core.star.session_plugin_manager import SessionPluginManager
++from astrbot.core.star.star_handler import EventType, star_handlers_registry
+ 
+ from .config import PluginConfig
+ from .cooldown import Cooldown
+@@ -174,13 +179,51 @@
+ 
+     async def respond_cmd(self, event: AiocqhttpMessageEvent):
+         """调用命令"""
++        cmd = self.cfg.get_command()
++        config = self.context.get_config(umo=event.unified_msg_origin)
++        normalized = " ".join(cmd.split())
++        for prefix in config.get("wake_prefix", []):
++            if normalized.startswith(prefix):
++                normalized = normalized[len(prefix) :].strip()
++                break
++        handlers = star_handlers_registry.get_handlers_by_event_type(
++            EventType.AdapterMessageEvent,
++            plugins_name=config.get("plugin_set", ["*"]),
++        )
++        handlers = await SessionPluginManager.filter_handlers_by_session(
++            event, handlers
++        )
++        matched = False
++        for handler in handlers:
++            if (
++                config.get("disable_builtin_commands", False)
++                and handler.handler_module_path
++                == "astrbot.builtin_stars.builtin_commands.main"
++            ):
++                continue
++            for handler_filter in handler.event_filters:
++                if isinstance(handler_filter, CommandFilter | CommandGroupFilter):
++                    matched = any(
++                        normalized == name or normalized.startswith(name + " ")
++                        for name in handler_filter.get_complete_command_names()
++                    )
++                elif isinstance(handler_filter, RegexFilter):
++                    matched = bool(handler_filter.regex.search(normalized))
++                if matched:
++                    break
++            if matched:
++                break
++        # Leave permissions and parameter checks to the normal command pipeline.
++        if not matched:
++            async for result in self.respond_llm(event):
++                yield result
++            return
++
+         evt = copy.copy(event)
+         evt.message_obj = copy.copy(event.message_obj)
+         evt._extras = dict(event.get_extra())
+         evt.clear_result()
+         event.stop_event()
+-
+-        cmd = self.cfg.get_command()
+ 
+         evt.message_obj.message = [Plain(cmd)]
+         evt.message_obj.message_str = cmd
+--- a/core/send_poke.py
++++ b/core/send_poke.py
+@@ -70,12 +70,13 @@
+         *,
+         target_ids: Sequence[str | int],
+         times: int = 1,
+-    ):
++    ) -> int:
+         """从事件发送戳一戳"""
+         if not target_ids:
+-            return
++            return 0
+ 
+         group_id = event.get_group_id()
++        delivered = 0
+ 
+         for tid in target_ids:
+             for _ in range(times):
+@@ -85,10 +86,12 @@
+                         user_id=tid,
+                         group_id=group_id,
+                     )
++                    delivered += 1
+                 except Exception as e:
+                     logger.warning(f"戳一戳失败 user_id={tid}: {e}")
+ 
+                 await asyncio.sleep(self.cfg.poke_interval)
++        return delivered
+ 
+     # ========= 直接 client 发送 =========
+ 
+--- a/main.py
++++ b/main.py
+@@ -91,12 +91,19 @@
+         actual_times = self._normalize_poke_times(times)
+ 
+         try:
+-            await self.sender.event_send(
++            delivered = await self.sender.event_send(
+                 event,
+                 target_ids=[user_id],
+                 times=actual_times,
+             )
+-            return f"已戳用户 {user_id} {actual_times} 次"
++            if not delivered:
++                return "戳一戳失败：平台未成功发送，请查看插件日志。"
++            if delivered != actual_times:
++                return (
++                    f"已戳用户 {user_id} {delivered} 次，"
++                    f"其余 {actual_times - delivered} 次发送失败。"
++                )
++            return f"已戳用户 {user_id} {delivered} 次"
+         except Exception as e:
+             return f"戳一戳失败：{e}"
+ 
+--- /dev/null
++++ b/tests/test_scheduler.py
+@@ -0,0 +1,63 @@
++"""Exercise scheduled delivery without connecting to QQ."""
++
++import importlib
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock
++
++_runtime = tempfile.TemporaryDirectory(prefix="pokepro-test-")
++os.environ["ASTRBOT_ROOT"] = _runtime.name
++_package = ModuleType("audited_pokepro")
++_package.__path__ = [str(Path(__file__).resolve().parents[1])]
++sys.modules[_package.__name__] = _package
++PokeScheduler = importlib.import_module("audited_pokepro.core.scheduler").PokeScheduler
++PokeSender = importlib.import_module("audited_pokepro.core.send_poke").PokeSender
++
++
++class SchedulerTests(unittest.IsolatedAsyncioTestCase):
++    async def test_one_target_is_delivered_as_one_whole_identifier(self):
++        config = SimpleNamespace(
++            scheduler=SimpleNamespace(cron="30 22 * * *", times=1),
++            target_list=[("456", "123456")],
++            poke_interval=0,
++        )
++        client = SimpleNamespace(group_poke=AsyncMock(), friend_poke=AsyncMock())
++        scheduler = PokeScheduler(config, PokeSender(config))
++        scheduler.set_client(client)
++        await scheduler._on_trigger()
++        client.group_poke.assert_awaited_once_with(group_id=456, user_id=123456)
++        client.friend_poke.assert_not_awaited()
++
++    async def test_multiple_targets_and_repetitions_remain_separate(self):
++        config = SimpleNamespace(
++            scheduler=SimpleNamespace(cron="30 22 * * *", times=2),
++            target_list=[("456", "123456"), ("789", "234567")],
++            poke_interval=0,
++        )
++        client = SimpleNamespace(group_poke=AsyncMock(), friend_poke=AsyncMock())
++        scheduler = PokeScheduler(config, PokeSender(config))
++        scheduler.set_client(client)
++        await scheduler._on_trigger()
++        self.assertEqual(
++            [call.kwargs for call in client.group_poke.await_args_list],
++            [{"group_id": 456, "user_id": 123456}] * 2
++            + [{"group_id": 789, "user_id": 234567}] * 2,
++        )
++
++    async def test_no_registered_client_does_not_send(self):
++        config = SimpleNamespace(
++            scheduler=SimpleNamespace(cron="30 22 * * *", times=1),
++            target_list=[("456", "123456")],
++        )
++        sender = SimpleNamespace(client_send=AsyncMock())
++        scheduler = PokeScheduler(config, sender)
++        await scheduler._on_trigger()
++        sender.client_send.assert_not_awaited()
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- /dev/null
++++ b/tests/test_delivery_and_commands.py
+@@ -0,0 +1,226 @@
++"""Regression checks for missing commands and accurate poke delivery status."""
++
++import asyncio
++import importlib
++import unittest
++from copy import deepcopy
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, Mock, patch
++
++import test_scheduler as bootstrap
++from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType
++from astrbot.core.config.default import DEFAULT_CONFIG
++from astrbot.core.message.components import Plain
++from astrbot.core.pipeline.waking_check.stage import WakingCheckStage
++from astrbot.core.platform.astr_message_event import AstrMessageEvent
++from astrbot.core.platform.platform_metadata import PlatformMetadata
++from astrbot.core.provider.entities import ProviderRequest
++from astrbot.core.star.filter.command import CommandFilter
++from astrbot.core.star.filter.permission import PermissionType, PermissionTypeFilter
++from astrbot.core.star.filter.regex import RegexFilter
++from astrbot.core.star.star import star_map
++from astrbot.core.star.star_handler import (
++    EventType,
++    StarHandlerMetadata,
++    StarHandlerRegistry,
++)
++
++GetPokeHandler = importlib.import_module("audited_pokepro.core.on_poke").GetPokeHandler
++LLMService = importlib.import_module("audited_pokepro.core.llm").LLMService
++PokeproPlugin = importlib.import_module("audited_pokepro.main").PokeproPlugin
++
++
++def event_for():
++    message = AstrBotMessage()
++    message.type = MessageType.GROUP_MESSAGE
++    message.group_id = "456"
++    message.session_id = "456"
++    message.self_id = "321"
++    message.sender = MessageMember(user_id="999", nickname="Member")
++    message.message = [Plain("")]
++    event = AstrMessageEvent(
++        "",
++        message,
++        PlatformMetadata(name="aiocqhttp", description="test", id="test"),
++        "456",
++    )
++    event.send = AsyncMock()
++    event.bot = SimpleNamespace(
++        get_group_member_info=AsyncMock(return_value={"card": "Alpha"}),
++        group_poke=AsyncMock(),
++        friend_poke=AsyncMock(),
++    )
++    return event
++
++
++class DeliveryTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.plugin = PokeproPlugin.__new__(PokeproPlugin)
++        self.plugin.cfg = SimpleNamespace(poke_interval=0, poke_max_times=5)
++        self.plugin.sender = bootstrap.PokeSender(self.plugin.cfg)
++        self.event = event_for()
++
++    async def test_all_failures_are_reported_as_failure(self):
++        self.event.bot.group_poke.side_effect = RuntimeError("Fake API refused")
++        result = await self.plugin.llm_poke_user(self.event, "888", 2)
++        self.assertIn("失败", result)
++        self.assertNotIn("已戳", result)
++        self.assertEqual(self.event.bot.group_poke.await_count, 2)
++
++    async def test_partial_delivery_reports_exact_success_count(self):
++        self.event.bot.group_poke.side_effect = [
++            None,
++            RuntimeError("Fake API refused"),
++            None,
++        ]
++        result = await self.plugin.llm_poke_user(self.event, "888", 3)
++        self.assertIn("2 次", result)
++        self.assertIn("1 次发送失败", result)
++
++    async def test_success_still_reports_full_count(self):
++        result = await self.plugin.llm_poke_user(self.event, "888", 3)
++        self.assertEqual(result, "已戳用户 888 3 次")
++
++
++class MissingCommandTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.config = deepcopy(DEFAULT_CONFIG)
++        self.queue = asyncio.Queue()
++        self.context = SimpleNamespace(
++            get_config=lambda **kwargs: self.config,
++            get_event_queue=lambda: self.queue,
++            conversation_manager=SimpleNamespace(
++                get_curr_conversation_id=AsyncMock(return_value=None),
++                new_conversation=AsyncMock(return_value="fictional"),
++                get_conversation=AsyncMock(return_value=None),
++            ),
++        )
++        self.handler = GetPokeHandler.__new__(GetPokeHandler)
++        self.handler.context = self.context
++        self.handler.cfg = SimpleNamespace(
++            get_command=lambda: "missing_meme",
++            llm=SimpleNamespace(template="{username} poked you. Reply naturally."),
++        )
++        self.handler.llm = LLMService(self.context, self.handler.cfg)
++        self.event = event_for()
++        self.registry = StarHandlerRegistry()
++        for target, value in (
++            ("audited_pokepro.core.on_poke.star_handlers_registry", self.registry),
++            (
++                "astrbot.core.pipeline.waking_check.stage.star_handlers_registry",
++                self.registry,
++            ),
++            (
++                "astrbot.core.star.session_plugin_manager.sp.get_async",
++                AsyncMock(return_value={}),
++            ),
++        ):
++            p = patch(target, value)
++            p.start()
++            self.addCleanup(p.stop)
++
++    def add_command(
++        self,
++        command="missing_meme",
++        active=True,
++        enabled=True,
++        permission=None,
++        regex=False,
++    ):
++        async def run(event):
++            raise AssertionError("A denied command must not run")
++
++        handler = StarHandlerMetadata(
++            event_type=EventType.AdapterMessageEvent,
++            handler_full_name="fake_command",
++            handler_name="command",
++            handler_module_path="test.plugin",
++            handler=run,
++            event_filters=[],
++            enabled=enabled,
++        )
++        handler.event_filters = [
++            RegexFilter(command)
++            if regex
++            else CommandFilter(command, handler_md=handler)
++        ]
++        if permission is not None:
++            handler.event_filters.append(PermissionTypeFilter(permission))
++        self.registry.append(handler)
++        p = patch.dict(
++            star_map,
++            {
++                "test.plugin": SimpleNamespace(
++                    name="test", activated=active, reserved=False
++                )
++            },
++        )
++        p.start()
++        self.addCleanup(p.stop)
++        return handler
++
++    async def test_uninstalled_command_falls_back_to_existing_poke_prompt(self):
++        results = [x async for x in self.handler.respond_cmd(self.event)]
++        self.assertEqual(len(results), 1)
++        self.assertIsInstance(results[0], ProviderRequest)
++        self.assertEqual(results[0].prompt, "Alpha poked you. Reply naturally.")
++        self.assertNotIn("missing_meme", results[0].prompt)
++        self.assertTrue(self.queue.empty())
++        self.assertFalse(self.event.is_stopped())
++
++    async def test_disabled_handler_is_not_a_usable_command(self):
++        self.add_command(enabled=False)
++        results = [x async for x in self.handler.respond_cmd(self.event)]
++        self.assertIsInstance(results[0], ProviderRequest)
++        self.assertTrue(self.queue.empty())
++
++    async def test_disabled_plugin_is_not_a_usable_command(self):
++        self.add_command(active=False)
++        results = [x async for x in self.handler.respond_cmd(self.event)]
++        self.assertIsInstance(results[0], ProviderRequest)
++        self.assertTrue(self.queue.empty())
++
++    async def test_session_disabled_plugin_falls_back(self):
++        self.add_command()
++        with patch(
++            "astrbot.core.star.session_plugin_manager.sp.get_async",
++            AsyncMock(
++                return_value={
++                    self.event.unified_msg_origin: {"disabled_plugins": ["test"]}
++                }
++            ),
++        ):
++            results = [x async for x in self.handler.respond_cmd(self.event)]
++        self.assertIsInstance(results[0], ProviderRequest)
++        self.assertTrue(self.queue.empty())
++
++    async def test_registered_regex_command_keeps_normal_dispatch(self):
++        self.add_command(command="^missing_meme$", regex=True)
++        results = [x async for x in self.handler.respond_cmd(self.event)]
++        self.assertEqual(results, [None])
++        queued = self.queue.get_nowait()
++        self.assertEqual(queued.get_message_str(), "missing_meme")
++        self.assertEqual(queued.get_sender_id(), "999")
++        self.assertTrue(queued.get_extra("is_poked"))
++
++    async def test_matching_admin_command_reaches_real_permission_denial_not_llm(self):
++        self.add_command(permission=PermissionType.ADMIN)
++        results = [x async for x in self.handler.respond_cmd(self.event)]
++        self.assertEqual(results, [None])
++        queued = self.queue.get_nowait()
++        stage = WakingCheckStage()
++        await stage.initialize(
++            SimpleNamespace(
++                astrbot_config=self.config, db_helper=None, astrbot_config_id="default"
++            )
++        )
++        stage._umo_auto_name_recorder = SimpleNamespace(schedule=Mock())
++        await stage.process(queued)
++        self.assertTrue(queued.is_stopped())
++        queued.send.assert_awaited_once()
++        self.assertIn("权限不足", queued.send.await_args.args[0].get_plain_text())
++        self.assertFalse(queued.get_extra("provider_request"))
++
++
++if __name__ == "__main__":
++    unittest.main()

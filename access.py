@@ -4,6 +4,8 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
 
+from .plugin_guards import guard_public_arguments
+
 PUBLIC_PLUGIN_TOOLS = {
     "astrbot_plugin_local_codex": {
         "send_voice",
@@ -13,6 +15,10 @@ PUBLIC_PLUGIN_TOOLS = {
     },
     "astrbot_plugin_listen_music": {"find_music", "deliver_music", "search_music"},
     "astrbot_plugin_livingmemory": {"recall_long_term_memory"},
+    "astrbot_plugin_music": {"play_song_by_name", "query_lyrics_by_name"},
+    "astrbot_plugin_stealer": {"search_meme", "send_meme"},
+    "astrbot_plugin_pokepro": {"llm_poke_user"},
+    "astrbot_plugin_qq_group_daily_analysis": {"group_daily_analysis_get_report"},
     "meme_manager": {"search_memes"},
 }
 
@@ -40,6 +46,17 @@ class QQToolPolicy:
         self.context = context
         self.config = config
 
+    def plugin_name(self, tool: FunctionTool) -> str:
+        """Resolve a tool's owner from the active installed plugin registry."""
+        module = tool.handler_module_path or ""
+        for star in self.context.get_all_stars():
+            if not star.activated or star.reserved or not star.module_path:
+                continue
+            root = star.module_path.rsplit(".", 1)[0]
+            if module == root or module.startswith(root + "."):
+                return root.rsplit(".", 1)[-1]
+        return ""
+
     def allows(self, event: AstrMessageEvent, tool: FunctionTool) -> bool:
         """Check the real sender and the installed plugin owning the tool.
 
@@ -59,25 +76,19 @@ class QQToolPolicy:
         owner_private = bool(owner) and sender == owner and not group
         if not owner or not (owner_private or bool(target) and group == target):
             return False
-        module = tool.handler_module_path or ""
-        for star in self.context.get_all_stars():
-            if not star.activated or star.reserved or not star.module_path:
-                continue
-            root = star.module_path.rsplit(".", 1)[0]
-            if module != root and not module.startswith(root + "."):
-                continue
-            plugin = root.rsplit(".", 1)[-1]
-            if plugin == "astrbot_plugin_local_codex":
-                switch = {
-                    "send_voice": "voice_enabled",
-                    "generate_image": "image_generation_enabled",
-                    "sing_cover": "singing_enabled",
-                    "find_cover_music": "singing_enabled",
-                }.get(tool.name)
-                if switch and not self.config.get(switch, False):
-                    return False
-            return owner_private or tool.name in PUBLIC_PLUGIN_TOOLS.get(plugin, set())
-        return False
+        plugin = self.plugin_name(tool)
+        if not plugin:
+            return False
+        if plugin == "astrbot_plugin_local_codex":
+            switch = {
+                "send_voice": "voice_enabled",
+                "generate_image": "image_generation_enabled",
+                "sing_cover": "singing_enabled",
+                "find_cover_music": "singing_enabled",
+            }.get(tool.name)
+            if switch and not self.config.get(switch, False):
+                return False
+        return owner_private or tool.name in PUBLIC_PLUGIN_TOOLS.get(plugin, set())
 
 
 class PermissionCheckedTool(FunctionTool):
@@ -109,6 +120,17 @@ class PermissionCheckedTool(FunctionTool):
         event = context.context.event
         if not self.policy.allows(event, self.original):
             raise PermissionError("This QQ sender is not allowed to use this tool.")
+        if event.get_group_id():
+            kwargs = await guard_public_arguments(
+                event,
+                self.policy.plugin_name(self.original),
+                self.original.name,
+                kwargs,
+            )
+            # Membership verification yields to the event loop; a disabled
+            # plugin must not execute after that asynchronous check completes.
+            if not self.policy.allows(event, self.original):
+                raise PermissionError("This plugin tool is no longer authorized.")
         if self.original.handler:
             handler, method = self.original.handler, "decorator_handler"
         elif type(self.original).call is not FunctionTool.call:

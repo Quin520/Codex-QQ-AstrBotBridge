@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 from astrbot.api import FunctionTool
 from astrbot.core.agent.run_context import ContextWrapper
@@ -139,3 +140,105 @@ class AccessTests(unittest.IsolatedAsyncioTestCase):
         results = [r async for r in FunctionToolExecutor.execute(checked, context)]
         self.assertEqual(results[0].content[0].text, "MUSIC_ONLY")
         self.assertFalse(self.marker.exists())
+
+
+class PublicPluginGuardTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.plugin = "astrbot_plugin_qq_group_daily_analysis"
+        self.calls = []
+        self.star = SimpleNamespace(
+            module_path=f"data.plugins.{self.plugin}.main",
+            activated=True,
+            reserved=False,
+        )
+        self.policy = QQToolPolicy(
+            SimpleNamespace(get_all_stars=lambda: [self.star]),
+            {"owner_qq": "123", "group_qq": "456"},
+        )
+
+    def tool(self, name, handler):
+        return PermissionCheckedTool(
+            FunctionTool(
+                name=name,
+                description="Test reviewed capability",
+                parameters={"type": "object", "properties": {}},
+                handler=handler,
+                handler_module_path=self.star.module_path,
+            ),
+            self.policy,
+        )
+
+    async def execute(self, tool, event, **kwargs):
+        context = ContextWrapper(context=SimpleNamespace(event=event))
+        return [
+            result
+            async for result in FunctionToolExecutor.execute(tool, context, **kwargs)
+        ]
+
+    async def test_group_report_is_bound_before_real_handler(self):
+        async def report(event, group=""):
+            self.calls.append(group)
+            return "REPORT_READY"
+
+        tool = self.tool("group_daily_analysis_get_report", report)
+        event = event_for("report", "999", "456", "321")
+        await self.execute(tool, event)
+        self.assertEqual(self.calls, ["456"])
+        with self.assertRaises(PermissionError):
+            await self.execute(tool, event, group="987")
+        self.assertEqual(self.calls, ["456"])
+        await self.execute(tool, event_for("report", "123"), group="987")
+        self.assertEqual(self.calls, ["456", "987"])
+
+    async def test_poke_membership_failure_never_reaches_handler(self):
+        self.star.module_path = "data.plugins.astrbot_plugin_pokepro.main"
+
+        async def poke(event, user_id, times=1):
+            self.calls.append((user_id, times))
+            return "POKE_READY"
+
+        tool = self.tool("llm_poke_user", poke)
+        event = event_for("poke", "999", "456", "321")
+        event.bot = SimpleNamespace(
+            get_group_member_info=AsyncMock(return_value={"user_id": 999})
+        )
+        await self.execute(tool, event, user_id="999", times=100)
+        self.assertEqual(self.calls, [("999", 5)])
+        event.bot.get_group_member_info.side_effect = RuntimeError("not a member")
+        with self.assertRaises(PermissionError):
+            await self.execute(tool, event, user_id="987")
+        self.assertEqual(self.calls, [("999", 5)])
+        self.star.activated = False
+        with self.assertRaises(PermissionError):
+            await self.execute(tool, event, user_id="999")
+
+    def test_new_plugin_read_capabilities_do_not_open_admin_or_url_actions(self):
+        event = event_for("hello", "999", "456", "321")
+        for plugin, allowed, denied in [
+            ("astrbot_plugin_stealer", "search_meme", "steal_meme"),
+            ("astrbot_plugin_music", "play_song_by_name", "download_arbitrary_file"),
+            (
+                "astrbot_plugin_qq_group_daily_analysis",
+                "group_daily_analysis_get_report",
+                "group_daily_analysis_trigger",
+            ),
+        ]:
+            self.star.module_path = f"data.plugins.{plugin}.main"
+            for name, expected in [(allowed, True), (denied, False)]:
+                tool = self.tool(name, AsyncMock()).original
+                self.assertEqual(self.policy.allows(event, tool), expected)
+
+    async def test_disabling_plugin_during_membership_lookup_revokes_execution(self):
+        self.star.module_path = "data.plugins.astrbot_plugin_pokepro.main"
+        handler = AsyncMock(return_value="UNEXPECTED")
+        tool = self.tool("llm_poke_user", handler)
+        event = event_for("poke", "999", "456", "321")
+
+        async def verify(**kwargs):
+            self.star.activated = False
+            return {"user_id": 999}
+
+        event.bot = SimpleNamespace(get_group_member_info=verify)
+        with self.assertRaises(PermissionError):
+            await self.execute(tool, event, user_id="999")
+        handler.assert_not_awaited()

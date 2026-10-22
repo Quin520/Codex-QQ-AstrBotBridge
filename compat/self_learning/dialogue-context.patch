@@ -1,0 +1,542 @@
+--- a/core/plugin_lifecycle.py
++++ b/core/plugin_lifecycle.py
+@@ -235,6 +235,7 @@
+                     group_id_to_unified_origin=group_id_to_unified_origin,
+                     db_manager=getattr(p, "db_manager", None),
+                     feature_delegation=getattr(p, "feature_delegation", None),
++                    context=p.context,
+                 )
+             else:
+                 p._hook_handler = None
+--- a/services/hooks/llm_hook_handler.py
++++ b/services/hooks/llm_hook_handler.py
+@@ -12,6 +12,7 @@
+ """
+ 
+ import asyncio
++import sys
+ import time
+ from datetime import datetime
+ from typing import Any, Dict, List, Optional
+@@ -57,6 +58,7 @@
+         perf_tracker: ``PerfTracker`` for recording timing samples.
+         group_id_to_unified_origin: Shared mapping from group_id to UMO.
+         db_manager: Database manager for approved few-shot retrieval.
++        context: AstrBot context used to verify an active bridge integration.
+     """
+ 
+     def __init__(
+@@ -72,6 +74,7 @@
+         db_manager: Any = None,
+         feature_delegation: Any = None,
+         shadow_mode_service: Any = None,
++        context: Any = None,
+     ) -> None:
+         self._config = plugin_config
+         self._diversity_manager = diversity_manager
+@@ -84,6 +87,7 @@
+         self._db_manager = db_manager
+         self._feature_delegation = feature_delegation
+         self._shadow_mode_service = shadow_mode_service
++        self._context = context
+         self._command_filter = CommandFilter()
+         if self._shadow_mode_service is None and db_manager is not None:
+             try:
+@@ -129,7 +133,49 @@
+ 
+             group_id = event.get_group_id() or event.get_sender_id()
+             user_id = event.get_sender_id()
++            # A proactive group event carries the last speaker only as a hint.
++            # Check the installed event class, not user-controlled extra flags.
++            proactive_module = sys.modules.get(
++                "data.plugins.astrbot_plugin_proactive_chat.core.proactive_event"
++            )
++            proactive_type = getattr(proactive_module, "ProactiveMessageEvent", None)
++            proactive_group = bool(event.get_group_id()) and type(event) is proactive_type
++            if proactive_group:
++                user_id = ""
+             persona_id = get_event_persona_scope(event, self._config)
++
++            # Respect the bridge's fixed persona only for its authorized chats.
++            # Plugin text/extra flags cannot stand in for the installed class.
++            natural_chat = False
++            if self._context:
++                bridge = self._context.get_registered_star("astrbot_plugin_local_codex")
++                bridge_module = sys.modules.get(
++                    "data.plugins.astrbot_plugin_local_codex.main"
++                )
++                bridge_type = getattr(bridge_module, "LocalCodex", None)
++                instance = getattr(bridge, "star_cls", None)
++                if (
++                    bridge_type is not None
++                    and bridge
++                    and bridge.activated
++                    and type(instance) is bridge_type
++                    and instance.config.get("integrate_plugins", False)
++                    and instance.config.get("natural_chat_enabled", False)
++                ):
++                    allowed = bridge_module.is_allowed(
++                        instance.config,
++                        event.get_platform_name(),
++                        event.get_sender_id(),
++                        event.get_group_id(),
++                    )
++                    if proactive_group:
++                        allowed = (
++                            event.get_platform_name() == "aiocqhttp"
++                            and bool(str(instance.config.get("owner_qq", "")).strip())
++                            and event.get_group_id()
++                            == str(instance.config.get("group_qq", "")).strip()
++                        )
++                    natural_chat = bool(allowed)
+ 
+             # Maintain group_id → unified_msg_origin mapping
+             if hasattr(event, "unified_msg_origin") and event.unified_msg_origin:
+@@ -187,7 +233,7 @@
+                 t0 = time.time()
+                 try:
+                     diversity_result = await asyncio.wait_for(
+-                        self._fetch_diversity(group_id), timeout=_ctx_timeout
++                        self._fetch_diversity(group_id, natural_chat), timeout=_ctx_timeout
+                     )
+                 except asyncio.TimeoutError:
+                     logger.warning(f"[LLM Hook] diversity timed out ({_ctx_timeout}s)")
+@@ -292,13 +338,15 @@
+                 group_id=group_id,
+                 user_id=user_id,
+                 persona_id=persona_id,
+-                include_social_relations=self._config.include_social_relations,
+-                include_affection=self._config.include_affection_info,
++                include_social_relations=bool(user_id)
++                and self._config.include_social_relations,
++                include_affection=bool(user_id) and self._config.include_affection_info,
+                 include_mood=False,
+                 include_expression_patterns=self._config.enable_expression_patterns,
+                 include_psychological=True,
+-                include_behavior_guidance=social_enabled,
+-                include_conversation_goal=self._config.enable_goal_driven_chat,
++                include_behavior_guidance=bool(user_id) and social_enabled,
++                include_conversation_goal=bool(user_id)
++                and self._config.enable_goal_driven_chat,
+                 enable_protection=True,
+             )
+         except Exception as e:
+@@ -334,14 +382,16 @@
+             return False
+ 
+     @monitored
+-    async def _fetch_diversity(self, group_id: str) -> Optional[str]:
++    async def _fetch_diversity(
++        self, group_id: str, natural_chat: bool = False
++    ) -> Optional[str]:
+         try:
+             content = await self._diversity_manager.build_diversity_prompt_injection(
+                 "",
+                 group_id=group_id,
+-                inject_style=True,
+-                inject_pattern=True,
+-                inject_variation=True,
++                inject_style=not natural_chat,
++                inject_pattern=not natural_chat,
++                inject_variation=not natural_chat,
+                 inject_history=True,
+             )
+             return content.strip() if content else None
+--- a/services/response/response_diversity_manager.py
++++ b/services/response/response_diversity_manager.py
+@@ -60,7 +60,7 @@
+         self.current_response_pattern = None
+ 
+         # 去重缓存: 同一group_id在短时间窗口内的重复调用直接返回缓存结果
+-        self._dedup_cache: Dict[str, Tuple[float, str]] = {}
++        self._dedup_cache: Dict[tuple, Tuple[float, str]] = {}
+         self._dedup_window = 5.0  # 5秒去重窗口
+ 
+         # 回复模式池
+@@ -244,9 +244,13 @@
+         """
+         try:
+             # 去重: 同一group在短时间窗口内的第二次调用直接返回已生成的结果
++            cache_key = (
++                group_id, inject_style, inject_pattern, inject_variation,
++                inject_history, enable_protection,
++            )
+             if group_id:
+                 now = time.time()
+-                cached_entry = self._dedup_cache.get(group_id)
++                cached_entry = self._dedup_cache.get(cache_key)
+                 if cached_entry and (now - cached_entry[0]) < self._dedup_window:
+                     logger.debug(f"[多样性管理器] 去重命中 (group={group_id})")
+                     return cached_entry[1] if not base_prompt else base_prompt + "\n\n" + cached_entry[1]
+@@ -332,7 +336,7 @@
+             # 缓存去重: 仅缓存注入部分（不含base_prompt），供后续调用复用
+             if group_id:
+                 injection_part = enhanced_prompt[len(base_prompt):]
+-                self._dedup_cache[group_id] = (time.time(), injection_part.strip())
++                self._dedup_cache[cache_key] = (time.time(), injection_part.strip())
+ 
+             return enhanced_prompt
+ 
+--- /dev/null
++++ b/tests/test_bridge_proactive_social.py
+@@ -0,0 +1,190 @@
++"""Keep proactive group context distinct from the last member's relationship.
++
++Run with the AstrBot Python environment and PYTHONPATH pointing at its core.
++SELF_LEARNING_PLUGIN_DIR and PROACTIVE_PLUGIN_DIR can select installed plugins;
++SELF_LEARNING_HOOK_FILE can select a staged handler for pre-deployment checks.
++No model calls, platform sends, or conversation database writes are performed.
++"""
++
++import importlib
++import importlib.util
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock
++
++RUNTIME = tempfile.TemporaryDirectory(prefix="proactive-social-test-")
++os.environ["ASTRBOT_ROOT"] = RUNTIME.name
++PLUGIN = Path(
++    os.environ.get("SELF_LEARNING_PLUGIN_DIR", Path(__file__).resolve().parents[1])
++)
++PROACTIVE = Path(
++    os.environ.get(
++        "PROACTIVE_PLUGIN_DIR", PLUGIN.parent / "astrbot_plugin_proactive_chat"
++    )
++)
++SELF_MODULE = "data.plugins.astrbot_plugin_self_learning"
++PROACTIVE_MODULE = "data.plugins.astrbot_plugin_proactive_chat"
++for name, directory in ((SELF_MODULE, PLUGIN), (PROACTIVE_MODULE, PROACTIVE)):
++    package = ModuleType(name)
++    package.__path__ = [str(directory)]
++    sys.modules[name] = package
++
++HOOK_MODULE = SELF_MODULE + ".services.hooks.llm_hook_handler"
++if override := os.environ.get("SELF_LEARNING_HOOK_FILE"):
++    spec = importlib.util.spec_from_file_location(HOOK_MODULE, override)
++    hook_module = importlib.util.module_from_spec(spec)
++    sys.modules[HOOK_MODULE] = hook_module
++    spec.loader.exec_module(hook_module)
++else:
++    hook_module = importlib.import_module(HOOK_MODULE)
++
++from astrbot.api.provider import ProviderRequest
++from astrbot.core.platform.astr_message_event import AstrMessageEvent
++from astrbot.core.platform.message_type import MessageType
++from astrbot.core.platform.platform_metadata import PlatformMetadata
++
++SocialContextInjector = importlib.import_module(
++    SELF_MODULE + ".services.social.social_context_injector"
++).SocialContextInjector
++proactive_module = importlib.import_module(PROACTIVE_MODULE + ".core.proactive_event")
++
++
++class ProactiveSocialTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.config = SimpleNamespace(
++            enable_llm_hooks=True,
++            enable_command_pass_through=True,
++            enable_social_context_injection=True,
++            include_social_relations=True,
++            include_affection_info=True,
++            enable_expression_patterns=True,
++            enable_goal_driven_chat=True,
++        )
++        self.social = SocialContextInjector(
++            database_manager=None,
++            affection_manager=object(),
++            psychological_state_manager=object(),
++            goal_manager=object(),
++        )
++        self.social._enable_protection = False
++        for name, marker in (
++            ("_build_psychological_context", "GROUP_PSYCHOLOGY"),
++            ("_format_expression_patterns_context", "GROUP_EXPRESSIONS"),
++            ("_format_affection_context", "MEMBER_AFFECTION"),
++            ("format_social_context", "MEMBER_RELATIONSHIPS"),
++            ("_build_behavior_guidance", "MEMBER_BEHAVIOR"),
++            ("_format_conversation_goal_context", "MEMBER_GOAL"),
++        ):
++            setattr(self.social, name, AsyncMock(return_value=marker))
++        self.diversity = SimpleNamespace(
++            build_diversity_prompt_injection=AsyncMock(return_value="GROUP_STYLE"),
++            get_current_style=lambda: "default",
++            get_current_pattern=lambda: "chat",
++        )
++        self.hook = hook_module.LLMHookHandler(
++            self.config,
++            self.diversity,
++            self.social,
++            None,
++            None,
++            None,
++            SimpleNamespace(record=lambda value: None),
++            {},
++        )
++
++    def event(self, group=True, sender="999", ordinary_type=None):
++        event = proactive_module.ProactiveMessageEvent(
++            plugin=None,
++            platform_meta=PlatformMetadata(
++                name="aiocqhttp", description="fixture", id="test"
++            ),
++            session_id="test:GroupMessage:456" if group else "test:FriendMessage:999",
++            target_id="456" if group else "999",
++            message_type=MessageType.GROUP_MESSAGE
++            if group
++            else MessageType.FRIEND_MESSAGE,
++            self_id="321",
++            sender_id=sender,
++            sender_name="Fixture member",
++            is_group=group,
++        )
++        if ordinary_type:
++            return ordinary_type(
++                "hello", event.message_obj, event.platform_meta, event.session_id
++            )
++        return event
++
++    async def run_hook(self, event):
++        request = ProviderRequest(prompt="Start a group conversation.")
++        await self.hook.handle(event, request)
++        return "\n".join(
++            part.text
++            for part in request.extra_user_content_parts
++            if hasattr(part, "text")
++        )
++
++    async def test_real_proactive_group_retains_group_context_without_last_member(self):
++        text = await self.run_hook(self.event())
++        for marker in ("GROUP_PSYCHOLOGY", "GROUP_EXPRESSIONS", "GROUP_STYLE"):
++            self.assertIn(marker, text)
++        for name in (
++            "_format_affection_context",
++            "format_social_context",
++            "_build_behavior_guidance",
++            "_format_conversation_goal_context",
++        ):
++            getattr(self.social, name).assert_not_awaited()
++        self.assertNotIn("MEMBER_", text)
++        self.assertEqual(
++            self.social._format_expression_patterns_context.call_args.kwargs["user_id"],
++            "",
++        )
++
++    async def test_real_proactive_group_without_member_hint_has_group_context(self):
++        text = await self.run_hook(self.event(sender=""))
++        self.assertIn("GROUP_PSYCHOLOGY", text)
++        self.assertNotIn("MEMBER_", text)
++
++    async def test_proactive_private_event_retains_real_recipient(self):
++        text = await self.run_hook(self.event(group=False))
++        self.assertIn("MEMBER_AFFECTION", text)
++        self.social._format_affection_context.assert_awaited_once_with("999", "999")
++
++    async def test_ordinary_group_still_uses_current_sender(self):
++        text = await self.run_hook(self.event(ordinary_type=AstrMessageEvent))
++        self.assertIn("MEMBER_RELATIONSHIPS", text)
++        self.social._format_affection_context.assert_awaited_once_with("456", "999")
++
++    async def test_extra_flags_cannot_claim_proactive_identity(self):
++        event = self.event(ordinary_type=AstrMessageEvent)
++        event.set_extra("proactive", True)
++        event.set_extra("plugin_llm_request", True)
++        event._proactive_is_group = True
++        text = await self.run_hook(event)
++        self.assertIn("MEMBER_AFFECTION", text)
++
++    async def test_same_class_name_and_module_are_not_the_registered_event_type(self):
++        spoof = type(
++            "ProactiveMessageEvent",
++            (AstrMessageEvent,),
++            {
++                "__module__": PROACTIVE_MODULE + ".core.proactive_event",
++            },
++        )
++        text = await self.run_hook(self.event(ordinary_type=spoof))
++        self.assertIn("MEMBER_AFFECTION", text)
++
++    async def test_social_switch_still_disables_group_context(self):
++        self.config.enable_social_context_injection = False
++        text = await self.run_hook(self.event())
++        self.assertNotIn("GROUP_PSYCHOLOGY", text)
++        self.social._build_psychological_context.assert_not_awaited()
++        self.assertIn("GROUP_STYLE", text)
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- /dev/null
++++ b/tests/test_bridge_natural_style.py
+@@ -0,0 +1,167 @@
++"""Preserve configured Codex persona without altering background learning calls.
++
++Uses the companion proactive identity test's isolated AstrBot setup. Set
++SELF_LEARNING_DIVERSITY_FILE to validate a staged diversity manager.
++"""
++
++import importlib
++import importlib.util
++import os
++import sys
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock
++
++import test_bridge_proactive_social as fixture
++
++BRIDGE_NAME = "data.plugins.astrbot_plugin_local_codex"
++bridge_path = Path(
++    os.environ.get(
++        "CODEX_BRIDGE_PLUGIN_DIR", fixture.PLUGIN.parent / "astrbot_plugin_local_codex"
++    )
++)
++package = ModuleType(BRIDGE_NAME)
++package.__path__ = [str(bridge_path)]
++sys.modules[BRIDGE_NAME] = package
++bridge_module = importlib.import_module(BRIDGE_NAME + ".main")
++
++DIVERSITY_NAME = fixture.SELF_MODULE + ".services.response.response_diversity_manager"
++if override := os.environ.get("SELF_LEARNING_DIVERSITY_FILE"):
++    spec = importlib.util.spec_from_file_location(DIVERSITY_NAME, override)
++    diversity_module = importlib.util.module_from_spec(spec)
++    sys.modules[DIVERSITY_NAME] = diversity_module
++    spec.loader.exec_module(diversity_module)
++else:
++    diversity_module = importlib.import_module(DIVERSITY_NAME)
++
++
++class NaturalStyleTests(unittest.IsolatedAsyncioTestCase):
++    event = fixture.ProactiveSocialTests.event
++    run_hook = fixture.ProactiveSocialTests.run_hook
++
++    def setUp(self):
++        fixture.ProactiveSocialTests.setUp(self)
++        self.bridge = bridge_module.LocalCodex.__new__(bridge_module.LocalCodex)
++        self.bridge.config = {
++            "integrate_plugins": True,
++            "natural_chat_enabled": True,
++            "owner_qq": "123",
++            "group_qq": "456",
++        }
++        self.star = SimpleNamespace(activated=True, star_cls=self.bridge)
++        self.hook._context = SimpleNamespace(get_registered_star=lambda name: self.star)
++        self.database = SimpleNamespace(
++            get_recent_bot_responses=AsyncMock(return_value=["PREVIOUS_OPENING"])
++        )
++        self.diversity = diversity_module.ResponseDiversityManager(
++            SimpleNamespace(), self.database
++        )
++        self.diversity._enable_protection = False
++        self.diversity.get_random_language_style = lambda: "RANDOM_STYLE"
++        self.diversity.get_random_response_pattern = lambda: "RANDOM_PATTERN"
++        self.diversity.get_expression_variation = lambda: {
++            "sentence_style": "RANDOM_SENTENCE",
++            "tone": "RANDOM_TONE",
++            "emphasis": "RANDOM_EMPHASIS",
++        }
++        self.hook._diversity_manager = self.diversity
++
++    def assert_stable(self, text):
++        self.assertIn("PREVIOUS_OPENING", text)
++        self.assertNotIn("RANDOM_", text)
++
++    async def test_authorized_group_retains_history_without_random_persona(self):
++        text = await self.run_hook(self.event(ordinary_type=fixture.AstrMessageEvent))
++        self.assert_stable(text)
++        self.assertIn("MEMBER_AFFECTION", text)
++        self.database.get_recent_bot_responses.assert_awaited_once_with("456", limit=5)
++
++    async def test_owner_private_and_proactive_group_use_stable_style(self):
++        private = self.event(
++            group=False, sender="123", ordinary_type=fixture.AstrMessageEvent
++        )
++        self.assert_stable(await self.run_hook(private))
++        self.assert_stable(await self.run_hook(self.event(sender="")))
++
++    async def test_switch_off_or_integration_off_preserves_existing_style(self):
++        for key in ("natural_chat_enabled", "integrate_plugins"):
++            with self.subTest(key=key):
++                self.bridge.config[key] = False
++                text = await self.run_hook(
++                    self.event(ordinary_type=fixture.AstrMessageEvent)
++                )
++                self.assertIn("RANDOM_STYLE", text)
++                self.assertIn("RANDOM_PATTERN", text)
++                self.bridge.config[key] = True
++
++    async def test_outside_group_and_untrusted_private_keep_existing_style(self):
++        events = [
++            self.event(
++                group=False, sender="999", ordinary_type=fixture.AstrMessageEvent
++            )
++        ]
++        outside = self.event(ordinary_type=fixture.AstrMessageEvent)
++        outside.message_obj.group.group_id = "777"
++        events.append(outside)
++        foreign = self.event(ordinary_type=fixture.AstrMessageEvent)
++        foreign.platform_meta.name = "telegram"
++        events.append(foreign)
++        for event in events:
++            with self.subTest(
++                group=event.get_group_id(), platform=event.get_platform_name()
++            ):
++                self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++
++    async def test_missing_inactive_or_lookalike_bridge_cannot_change_style(self):
++        event = self.event(ordinary_type=fixture.AstrMessageEvent)
++        self.star.activated = False
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.star.activated = True
++        lookalike = type("LocalCodex", (), {"__module__": BRIDGE_NAME + ".main"})()
++        lookalike.config = self.bridge.config
++        self.star.star_cls = lookalike
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.star = None
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++
++    async def test_changing_switch_does_not_reuse_opposite_style_cache(self):
++        event = self.event(ordinary_type=fixture.AstrMessageEvent)
++        self.bridge.config["natural_chat_enabled"] = False
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.bridge.config["natural_chat_enabled"] = True
++        self.assert_stable(await self.run_hook(event))
++        self.bridge.config["natural_chat_enabled"] = False
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.assertEqual(self.database.get_recent_bot_responses.await_count, 2)
++
++    async def test_background_json_learning_keeps_its_own_prompt_and_format(self):
++        adapter_type = importlib.import_module(
++            fixture.SELF_MODULE + ".core.framework_llm_adapter"
++        ).FrameworkLLMAdapter
++        adapter = adapter_type(self.hook._context)
++        provider = SimpleNamespace(
++            meta=lambda: SimpleNamespace(id="local_codex"),
++            text_chat=AsyncMock(
++                return_value=SimpleNamespace(completion_text='{"changes":[]}')
++            ),
++        )
++        adapter.filter_provider = provider
++        result = await adapter.filter_chat_completion(
++            prompt="Analyze fictional preference evidence.",
++            contexts=[],
++            system_prompt="Return only review JSON.",
++            response_format={"type": "json_object"},
++        )
++        self.assertEqual(result, '{"changes":[]}')
++        provider.text_chat.assert_awaited_once_with(
++            prompt="Analyze fictional preference evidence.",
++            contexts=[],
++            system_prompt="Return only review JSON.",
++            response_format={"type": "json_object"},
++        )
++        self.database.get_recent_bot_responses.assert_not_awaited()
++
++
++if __name__ == "__main__":
++    unittest.main()

@@ -1,0 +1,20 @@
+{
+  "plugin": "astrbot_plugin_music",
+  "version": "v2.2.0",
+  "bridge_version": "v0.3.14",
+  "hash_algorithm": "sha256",
+  "files": {
+    "core/downloader.py": {
+      "before": "98dcf51bb30017b650bde843566d3e49e9101304ba6dd078d942afb39476c553",
+      "after": "259e665006be309ba5423a17d1fe175622346f2f1f39fb5466ef3cd1919e9fa9"
+    },
+    "main.py": {
+      "before": "125e80acd48e34e7b59753a5bd9a89e18867cec8bdcc656cfbef8e1a46611d71",
+      "after": "06a53d9ad964b163f1fbbcc2b53a2fa6404c403ca2b351fab344e36a641093a2"
+    },
+    "tests/test_bridge_music_compat.py": {
+      "before": null,
+      "after": "fed403b9dd5cc5ed5acbcf82216db3a4a56c140db81aa63280e74e48209a724e"
+    }
+  }
+}

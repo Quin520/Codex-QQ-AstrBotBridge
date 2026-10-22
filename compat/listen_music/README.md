@@ -31,3 +31,21 @@
 在打补丁后的听歌插件目录使用 AstrBot 的 Python 执行 `python -m unittest discover -s tests -q`；桥接的 `tests/test_music_routing.py` 使用真实 AstrBot 流程检查链接让路及正常预览，不发送 QQ 消息。网络限制可能随时间变化；搜索失败后应检查具体 HTTP/API 错误，不能从错误推断歌曲不存在。
 
 本次增加 16 项回归，相关 49 项测试通过。听歌插件在 Windows 上的完整 126 项测试仍有 7 项原有路径相关失败，与原始 110 项测试的失败一致；此补丁未修改账号存储或删除这些测试，不宣称完整测试全部通过。
+
+## Windows 账号保存补丁（v0.3.14）
+
+另提供独立的 [windows-credentials.patch](windows-credentials.patch) 和 [windows-credentials-baseline.json](windows-credentials-baseline.json)，不替换上面的 v0.3.12 搜索补丁。它只修改 `core/accounts.py`，并新增 `tests/test_windows_credentials.py`。
+
+原版无条件调用 `os.fchmod`，Windows 扫码确认后会因该 API 不存在而无法保存。修复在写入凭据前，用系统 `whoami.exe` 取得当前用户 SID，再用系统 `icacls.exe` 将临时空文件设为不继承权限、仅该用户可访问；随后写入并原子替换。权限设置失败会中止并保留旧文件，不会回退到宽松权限。系统子进程隐藏运行且有超时；非 Windows 保持 0600。
+
+先备份并按独立基线核对哈希，再在听歌插件根目录执行：
+
+```powershell
+git -c core.autocrlf=false apply --check 'D:\Plugins\astrbot_plugin_local_codex\compat\listen_music\windows-credentials.patch'
+git -c core.autocrlf=false apply 'D:\Plugins\astrbot_plugin_local_codex\compat\listen_music\windows-credentials.patch'
+python -m unittest discover -s tests -p test_windows_credentials.py -v
+```
+
+Windows 的 ACL 验证测试需要 AstrBot 环境中的 `pywin32`；运行时修复只依赖系统工具。新增 2 项隔离测试通过：虚构账号登录持久化、登出及实际 DACL 验证；ACL 失败时旧文件不变且临时文件被清理。测试不登录真实账号、不发送 QQ 消息。由管理员重启 AstrBot 加载修复；它不解除 B 站 HTTP 412。
+
+已安装的上游 0.1.3 包未附 LICENSE。本目录保留作者及仓库来源，只提供指定基线的修改差异，不声明上游代码采用本桥接仓库的许可。请从上游获取原始插件。
