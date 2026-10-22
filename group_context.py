@@ -144,12 +144,13 @@ class GroupContext:
         event.set_extra("local_codex_group_reply", text)
 
     def observe_voice_reply(self, event: AstrMessageEvent, text: str) -> None:
-        """Remember only speech whose controlled sender confirmed delivery."""
+        """Remember only audio whose controlled sender confirmed delivery."""
         scope = self._scope(event)
+        cover = text == event.get_extra("local_codex_cover_text")
         if (
             not scope
             or not text
-            or text != event.get_extra("local_codex_voice_text")
+            or (not cover and text != event.get_extra("local_codex_voice_text"))
             or event.get_extra("local_codex_voice_remembered")
         ):
             return
@@ -164,7 +165,10 @@ class GroupContext:
                 "reply_to": ""
                 if is_proactive_group(event)
                 else str(event.get_sender_id()),
-                "text": "[已发送语音的文字内容] " + text[:760],
+                "text": (
+                    "[已发送翻唱的曲目说明] " if cover else "[已发送语音的文字内容] "
+                )
+                + text[:760],
             }
         )
         self._save()

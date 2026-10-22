@@ -22,6 +22,7 @@ QQ 普通账号 ⇄ NapCat ⇄ AstrBot / OneBot v11 ⇄ 本机 Codex CLI
 | 个性化 | 按 QQ 号选择关系、语气和回复习惯；区分当前发送者与本条真实 @ 的成员，分别匹配称呼和相处设置 |
 | 回复速度 | 默认请求 Fast 模式，可关闭；不额外发送“稍等，我想一下” |
 | 联网搜索 | 可选启用 Codex 自带的在线搜索和公开网页读取，无须另填搜索 API Key |
+| 角色翻唱 | 可选独立 RVC 环境，将点歌候选转换为固定角色音色；需另配角色模型，默认前 60 秒片段 |
 | 平台 | Windows 原生运行，AstrBot 的 OneBot v11（`aiocqhttp`）适配器 |
 
 机器人显示为登录 NapCat 的 QQ 账号，头像、昵称和群内身份由该账号决定。账号需通过正常流程加入目标群；此链路不使用 QQ 官方机器人的 Webhook。
@@ -167,7 +168,43 @@ Edge TTS 无需 API Key，但属于微软在线服务：**需要朗读的文本�
 
 安装本仓库更新后的[主动消息兼容补丁](compat/proactive_chat/README.md)，并允许目标群主动发言后，模型也可按人格和场景选择简短语音问候。桥接不新增计时器，启停主动消息插件仍控制自动发言。关闭主动消息插件好友和群聊设置中的“启用 TTS”（`friend_settings.tts_settings.enable_tts`、`group_settings.tts_settings.enable_tts`），由按需语音工具决定发送时机。
 
-这项功能是朗读，适合祝福和问候，不能把“听你唱歌”变成真正的歌唱。播放现成歌曲继续用听歌插件；生成新的歌声需要另外接入音乐生成能力。接收 QQ 语音并理解内容则需要 STT，与这里的语音输出分开配置。
+更换说话声音时，在 **模型提供商 → 对应 Edge TTS 提供商** 修改 `edge-tts-voice`。例如 `zh-CN-XiaoxiaoNeural`（晓晓）、`zh-CN-XiaoyiNeural`（晓伊）、`zh-TW-HsiaoChenNeural`（台湾普通话）。可用音色以 `python -m edge_tts --list-voices` 的实时结果为准；语速用 `-5%` 等值，音调用 `+5Hz` 等值。调音高不会使朗读变成唱歌，也不能把 Edge 音色名直接当作 RVC 音色模型。
+
+这项功能是朗读，适合祝福和问候。播放现成歌曲继续用听歌插件；固定角色翻唱见下节。接收 QQ 语音并理解内容则需要 STT，与语音输出分开配置。
+
+### 固定角色音色翻唱
+
+启用“我想听歌！”v0.1.3、插件接入模式和“允许固定角色音色翻唱”，然后说 `@机器人 用你的声音翻唱《歌名》`。模型先用 `find_music` 搜歌，再把本次候选交给 `sing_cover`。普通“播放《歌名》”仍播放原曲。
+
+翻唱流程：下载选中的音源 → 截取片段 → 分离人声和伴奏 → RVC 转换为角色音色 → 混音 → 当前会话 QQ 语音。它保留已有歌曲的旋律和歌词，不是按主题创作新歌。尚未选择角色模型时只提示未就绪；不会用原曲或朗读歌词代替成功结果。
+
+后端针对 [RVC 官方仓库](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI) commit `81eed5e8f68b6bed1789f682fe78cdd324495afc` 的 `infer/cli.py` 和 `tools.pymss.cli` 实现。参照该版本[安装文档](https://github.com/RVC-Project/Retrieval-based-Voice-Conversion-WebUI/blob/81eed5e8f68b6bed1789f682fe78cdd324495afc/docs/en/README.en.md)，使用 **单独 Python 3.12 环境**，不要把 Torch、分离器等依赖装入 AstrBot。RTX 50 系使用官方列出的 Torch/Torchaudio `2.7.1+cu128` 及 `requirments_cu128_py312.txt`。
+
+基础文件只需下列六个，不需要训练权重、其他分离模型或 WebUI 服务：
+
+| 下载来源 | RVC 目录内的位置 |
+| --- | --- |
+| `lj1995/VoiceConversionWebUI` 的 `hubert_base/config.json`、`hubert_base/preprocessor_config.json`、`hubert_base/pytorch_model.bin` | `assets/hubert_base/` 下对应三个文件 |
+| 同仓库 `rmvpe.pt` | `assets/rmvpe/rmvpe.pt` |
+| `baicai1145/pymss` 的 `vocal/vocal_extraction/model_bs_roformer_ep_368_sdr_12.9628.ckpt` 及同名 `.yaml` | `assets/pymss_weights/vocal/vocal_extraction/` 下对应两个文件 |
+
+模型来源：[RVC 基础权重](https://huggingface.co/lj1995/VoiceConversionWebUI)、[分离权重](https://huggingface.co/baicai1145/pymss)。角色 `.pth` 和可选匹配 `.index` 由主人另外选择；只加载可信模型，模型本身的使用许可单独确认。工作进程不会根据聊天内容安装或下载音色。
+
+在桥接配置中填写：
+
+| 配置 | 用途 |
+| --- | --- |
+| `singing_python` | 独立翻唱环境的 Python 绝对路径 |
+| `singing_rvc_root` | 上述官方 RVC 的目录 |
+| `singing_model` / `singing_index` | 角色 `.pth` / 可选 `.index` 的绝对路径；模型留空即等待选音色 |
+| `singing_pitch` | 升降半音，默认 0，范围 -12–12 |
+| `singing_duration_seconds` | 歌曲前段长度，默认 60 秒，范围 30–120 |
+| `singing_device` | `cuda` 使用 NVIDIA 显卡，`cpu` 较慢 |
+| `singing_cooldown_seconds` | 同群请求间隔，默认 300 秒，范围 60–3600 |
+
+确认 AstrBot 进程能找到 `ffmpeg` 和 `ffprobe`，工具超时至少 **300 秒**，保存并重启 AstrBot。翻唱使用本机算力，不使用 Codex 的音频生成接口。下载最多等待 45 秒、制作工作进程最多 180 秒、整次任务最多 260 秒；处理过慢会明确失败，不能保证每台机器完成 120 秒片段。主动发言不自动触发翻唱。
+
+同群所有成员共享冷却，失败尝试也计入；全实例只制作一首，禁用/卸载会取消任务并终止其子进程。工具参数只有当前搜索 ID 和候选序号，不能指定任意文件、网址、接收人或安装命令。听歌候选会校验会话和一次性租约，依赖插件私有接口不兼容时明确失败。音源和输出在本次发送结束后清理；最近一次工作进程日志仅保存在本机桥接数据目录 `singing/last-worker.log`，不得公开上传。
 
 ### 接入已下载的插件
 
@@ -291,7 +328,7 @@ AstrBot 自带一个 `/new`。为避免两个命令同时触发、以及普通�
 
 ### QQ 权限边界
 
-群聊只向模型开放已启用点歌插件的 `find_music`、`deliver_music`、`search_music`，表情包插件的 `search_memes`，LivingMemory `recall_long_term_memory`，以及本桥接的 `send_voice`、`generate_image`。记忆召回按真实事件的会话或本群作用域检索，模型不能指定其他群或他人私聊；需在 LivingMemory 中保留会话过滤。语音和生图需分别开启，只能发送到当前事件所属会话，工具参数不包含接收人或文件路径。工具名称与来源插件必须同时匹配；新安装的插件不会自动获得群聊模型工具权限。自学习和主动消息的已有事件流程仍由各自插件配置控制。
+群聊只向模型开放已启用点歌插件的 `find_music`、`deliver_music`、`search_music`，表情包插件的 `search_memes`，LivingMemory `recall_long_term_memory`，以及本桥接的 `send_voice`、`generate_image`、`sing_cover`。记忆召回按真实事件的会话或本群作用域检索，模型不能指定其他群或他人私聊；需在 LivingMemory 中保留会话过滤。语音、生图和翻唱需分别开启，只能发送到当前事件所属会话，工具参数不包含接收人或文件路径。工具名称与来源插件必须同时匹配；新安装的插件不会自动获得群聊模型工具权限。自学习和主动消息的已有事件流程仍由各自插件配置控制。
 
 其他下载插件的模型工具仅可由 `owner_qq` 的私聊使用，执行前会再次核对当前 QQ 身份及插件状态。群主、群管理员、昵称和消息中的身份声明不能获得此权限；所有者在群中发言也使用群聊工具范围。聊天身份依据 OneBot 事件，请保护 OneBot Token 并让连接端口仅供本机使用。
 

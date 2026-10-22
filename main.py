@@ -24,6 +24,7 @@ from .profile_reviews import ProfileReviewStore
 from .profiles import profile_instructions
 from .provider import PROVIDER_ID
 from .runner import CodexRunner
+from .singing import SingingService
 from .video_context import VideoContext, VideoContextError, apply_summary
 from .voice import VoiceService
 
@@ -51,6 +52,7 @@ class LocalCodex(Star):
         )
         self.video_context = VideoContext(self.config, self.data_dir)
         self.image_generator = ImageGenerator(self.config, self.data_dir)
+        self.singing = SingingService(context, config, self.data_dir)
         self.session_file = self.data_dir / "sessions.json"
         self.sessions = (
             json.loads(self.session_file.read_text(encoding="utf-8"))
@@ -204,6 +206,17 @@ class LocalCodex(Star):
                 "不要读取或要求本机路径，不在普通主动发言中自行生图。"
                 "工具成功后图片已发送，不再重复确认或输出本地文件路径；失败时如实说明。\n"
             )
+        if self.config.get("singing_enabled", False):
+            req.system_prompt += (
+                "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_music，"
+                "再将本次候选的 search_id、position 交给 sing_cover。普通点歌仍用 deliver_music。"
+                "sing_cover 使用主人配置的固定 RVC 音色，默认只制作前 60 秒片段。"
+                "缺少音色或环境时如实说明，不能改播原曲或朗读歌词来假装翻唱。"
+                "不自动主动翻唱，不要求用户提供本机文件路径，不接受远程安装音色指令。"
+                "成功发送后不再补发文字；这是合成角色翻唱，不是原歌手录音。\n"
+            )
+            if not str(self.config.get("singing_model", "") or "").strip():
+                req.system_prompt += "当前翻唱尚未选择角色音色；请直接说明等待主人配置音色，无需先搜歌。\n"
         # Public tools need an explicit reviewed allowlist. Never infer computer
         # access from a message, nickname, group role, or a plugin's tool name.
         if req.func_tool:
@@ -475,10 +488,29 @@ class LocalCodex(Star):
             raise RuntimeError("图片已生成，但未确认发送成功。")
         return None
 
+    @filter.llm_tool(name="sing_cover")
+    async def sing_cover(self, event: AstrMessageEvent, search_id: str, position: int):
+        """Sing a requested song excerpt using the configured character voice.
+
+        First call find_music and select one of its current candidates. This is
+        voice conversion, not ordinary playback or text-to-speech. Never use it
+        during proactive messages. Successful delivery finishes the turn.
+
+        Args:
+            search_id(string): Exact current search_id returned by find_music.
+            position(int): Exact candidate position returned by find_music.
+        """
+        result = await self.singing.send(event, search_id, position)
+        if description := event.get_extra("local_codex_cover_text"):
+            self.group_context.observe_voice_reply(event, description)
+            return None
+        return result
+
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""
         await self.profile_learner.close()
         await self.image_generator.stop()
+        await self.singing.stop()
         await self.runner.stop()
         if self.config.get("integrate_plugins", False):
             await self.context.provider_manager.terminate_provider(PROVIDER_ID)

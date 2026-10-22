@@ -5,7 +5,7 @@ from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
 
 PUBLIC_PLUGIN_TOOLS = {
-    "astrbot_plugin_local_codex": {"send_voice", "generate_image"},
+    "astrbot_plugin_local_codex": {"send_voice", "generate_image", "sing_cover"},
     "astrbot_plugin_listen_music": {"find_music", "deliver_music", "search_music"},
     "astrbot_plugin_livingmemory": {"recall_long_term_memory"},
     "meme_manager": {"search_memes"},
@@ -66,6 +66,7 @@ class QQToolPolicy:
                 switch = {
                     "send_voice": "voice_enabled",
                     "generate_image": "image_generation_enabled",
+                    "sing_cover": "singing_enabled",
                 }.get(tool.name)
                 if switch and not self.config.get(switch, False):
                     return False

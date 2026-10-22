@@ -101,6 +101,61 @@
     "hint": "默认 30，范围 5–600；同一群的成员共享冷却，一次回复最多一条语音。",
     "default": 30
   },
+  "singing_enabled": {
+    "type": "bool",
+    "description": "允许固定角色音色翻唱",
+    "hint": "用户明确要求时，将当前点歌候选转成角色音色后发送语音。需要我想听歌！插件及独立 RVC 环境；没有音色时明确提示，不改播原曲。",
+    "default": false
+  },
+  "singing_python": {
+    "type": "string",
+    "description": "翻唱环境 Python 路径",
+    "hint": "填写单独安装 RVC 依赖的 Python 可执行文件绝对路径，不使用 AstrBot 的 Python。仅由主人在管理页配置。",
+    "default": ""
+  },
+  "singing_rvc_root": {
+    "type": "string",
+    "description": "RVC 运行目录",
+    "hint": "官方 RVC 目录，需包含 infer/cli.py、tools/pymss 及 README 所列基础权重；不在聊天中下载模型。",
+    "default": ""
+  },
+  "singing_model": {
+    "type": "string",
+    "description": "角色音色模型（.pth）",
+    "hint": "填写你选择的可信 RVC 音色模型绝对路径，留空表示等待选音色。Edge TTS 音色名不能填在这里。",
+    "default": ""
+  },
+  "singing_index": {
+    "type": "string",
+    "description": "音色检索文件（.index，可选）",
+    "hint": "若音色附带匹配的 .index 文件，可填写其绝对路径；不匹配时请留空。",
+    "default": ""
+  },
+  "singing_pitch": {
+    "type": "int",
+    "description": "翻唱升降调（半音）",
+    "hint": "默认 0，范围 -12 到 12。可根据原唱与角色音域调整；不会改变说话 TTS 设置。",
+    "default": 0
+  },
+  "singing_duration_seconds": {
+    "type": "int",
+    "description": "翻唱片段长度（秒）",
+    "hint": "默认歌曲前 60 秒，范围 30–120。短片段更适合 QQ 语音，也能减少等待。",
+    "default": 60
+  },
+  "singing_device": {
+    "type": "string",
+    "description": "翻唱计算设备",
+    "hint": "cuda 使用 NVIDIA 显卡，需要匹配的 PyTorch；cpu 较慢。不会自动切换设备或更改其他程序。",
+    "options": ["cuda", "cpu"],
+    "default": "cpu"
+  },
+  "singing_cooldown_seconds": {
+    "type": "int",
+    "description": "同群翻唱请求间隔（秒）",
+    "hint": "默认 300，范围 60–3600；同群所有成员共享，一次只处理一个请求，失败也保留冷却。",
+    "default": 300
+  },
   "image_generation_enabled": {
     "type": "bool",
     "description": "允许 Codex CLI 按需生图",
