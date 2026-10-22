@@ -1,0 +1,10 @@
+{
+  "core/memory_scope.py": {
+    "before": "35720e27f868c1fffaeba5e56b87d6eb29154193246653f9a84d025e812eaece",
+    "after": "3e66cf06c37075f011f2f7c67fcaeb99c7ea1fe17eb9f9c2dbedee8674b04eca"
+  },
+  "tests/test_bridge_memory_scope.py": {
+    "before": null,
+    "after": "27787dd8466b1f6b609609bc25a9b9993543102e4402ae6b4365ee583c3efb95"
+  }
+}

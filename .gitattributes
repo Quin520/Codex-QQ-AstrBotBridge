@@ -1,2 +1,4 @@
 # Unified patches require a space marker on otherwise empty context lines.
 compat/self_learning/*.patch whitespace=-blank-at-eol
+compat/proactive_chat/*.patch whitespace=-blank-at-eol
+compat/livingmemory/*.patch whitespace=-blank-at-eol

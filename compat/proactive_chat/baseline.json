@@ -1,0 +1,26 @@
+{
+  "core/session_parser.py": {
+    "before": "e455dc1f301116c4575ce3eb6f5161c0a8c7af38688bfbf6cabd9604af84daf9",
+    "after": "01e60a758423e04bed90dedb52877d43e7b43c0389864314c753458d8b328778"
+  },
+  "core/data_storage.py": {
+    "before": "8b6ae9708d47dae3c5c4b8676df86dee5a126d0eb99d6d462305c91655c1fe64",
+    "after": "c4b562b3628472d498ac589f218120d9aa824f41b0667ddc74bac3a3a5a3ec78"
+  },
+  "core/llm_adapter.py": {
+    "before": "9fe95af85bce22b2e1c19bc43a7bf65b3c90ee285ebab4c562b9a3d066d85b7c",
+    "after": "e10b7468345413b9f0901d3e61bf4c057a0e7c7aa096cb4e08e83438763b38d8"
+  },
+  "core/message_sender.py": {
+    "before": "82fb9d19047d9222271fe9c9d4e7f2c5c0a2f11e92e0e050a901dd348d3317bb",
+    "after": "3548698d985b227c052348b8f51c790c2b643af553a9cccb2f07ef0fdf5bb6ad"
+  },
+  "tests/test_bridge_sessions.py": {
+    "before": null,
+    "after": "5003d89f1068f51e581d2210aae9b92a352f9c94a419328a5c491df849e15b14"
+  },
+  "tests/test_proactive_llm.py": {
+    "before": null,
+    "after": "c41ad9c5e672f93d244fa02a1338e3823e11c694e96a75ac0c5d096137408cd5"
+  }
+}

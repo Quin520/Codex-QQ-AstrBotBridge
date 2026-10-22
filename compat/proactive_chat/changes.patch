@@ -1,0 +1,784 @@
+diff --git a/core/session_parser.py b/core/session_parser.py
+--- a/core/session_parser.py
++++ b/core/session_parser.py
+@@ -214,4 +214,14 @@
+             return session_id
+ 
+         platform, msg_type, target_id = parsed
++        # AstrBot isolates OneBot conversations as sender_group. Proactive
++        # timers belong to the whole group; never rewrite the incoming event.
++        if msg_type == "GroupMessage" and "_" in target_id:
++            sender_id, group_id = target_id.split("_", 1)
++            is_onebot = any(
++                p.meta().id == platform and p.meta().name == "aiocqhttp"
++                for p in self.context.platform_manager.get_insts()
++            )
++            if is_onebot and sender_id.isdecimal() and group_id.isdecimal():
++                target_id = group_id
+         return self._resolve_full_umo(target_id, msg_type, platform)
+diff --git a/core/data_storage.py b/core/data_storage.py
+--- a/core/data_storage.py
++++ b/core/data_storage.py
+@@ -70,6 +70,18 @@
+         """合并两份会话数据，避免重复任务与计数错乱。"""
+         # 先以 base 为主，再按字段规则吸收 incoming
+         merged = base.copy()
++        # Keep the speaker paired with the latest activity when isolated
++        # member sessions are folded into their shared group timer.
++        base_time = base.get("last_message_time", 0)
++        incoming_time = incoming.get("last_message_time", 0)
++        if (
++            isinstance(base_time, (int, float))
++            and isinstance(incoming_time, (int, float))
++            and incoming_time >= base_time
++            and incoming.get("last_sender_id")
++        ):
++            merged["last_sender_id"] = incoming["last_sender_id"]
++            merged["last_sender_name"] = incoming.get("last_sender_name", "")
+         for key in [
+             "self_id",
+             "last_message_time",
+diff --git a/core/llm_adapter.py b/core/llm_adapter.py
+--- a/core/llm_adapter.py
++++ b/core/llm_adapter.py
+@@ -24,7 +24,7 @@
+ from astrbot.api.provider import ProviderRequest
+ 
+ from ..utils.time_utils import format_current_time
+-from .proactive_event import dispatch_event_hook
++from .proactive_event import dispatch_event_hook, resolve_platform_instance
+ 
+ try:  # pragma: no cover - 取决于 AstrBot 版本
+     from astrbot.core.agent.message import TextPart
+@@ -318,7 +318,10 @@
+             return [], 0
+ 
+         platform_id, raw_user_key = parsed
+-        user_candidates = self._build_platform_history_user_candidates(raw_user_key)
++        user_candidates = [session_id]
++        user_candidates.extend(
++            self._build_platform_history_user_candidates(raw_user_key)
++        )
+         if not user_candidates:
+             return [], 0
+ 
+@@ -328,6 +331,53 @@
+                 "[主动消息] 当前上下文未提供消息历史管理器（message_history_manager），因此无法读取平台流水喵。"
+             )
+             return [], 0
++
++        parsed_session = self._parse_session_id(session_id)
++        if parsed_session and parsed_session[1] in {"GroupMessage", "GuildMessage"}:
++            # Current AstrBot stores complete UMOs, including isolated member
++            # conversations. Bare IDs cannot distinguish groups from private chats.
++            from astrbot.core.db.po import PlatformMessageHistory
++            from sqlalchemy import desc, or_, select
++
++            message_type = parsed_session[1]
++            group_scope = f"{platform_id}:{message_type}:{raw_user_key}"
++            scopes = [PlatformMessageHistory.user_id == group_scope]
++            platform = resolve_platform_instance(
++                self.context.platform_manager, platform_id
++            )
++            if (
++                platform is not None
++                and platform.meta().name == "aiocqhttp"
++                and message_type == "GroupMessage"
++                and raw_user_key.isdecimal()
++            ):
++                prefix = f"{platform_id}:GroupMessage:"
++                escaped_prefix = (
++                    prefix.replace("\\", "\\\\")
++                    .replace("%", "\\%")
++                    .replace("_", "\\_")
++                )
++                scopes.append(
++                    PlatformMessageHistory.user_id.like(
++                        f"{escaped_prefix}%\\_{raw_user_key}", escape="\\"
++                    )
++                )
++            async with mgr.db.get_db() as database:
++                result = await database.execute(
++                    select(PlatformMessageHistory)
++                    .where(
++                        PlatformMessageHistory.platform_id == platform_id,
++                        or_(*scopes),
++                    )
++                    .order_by(
++                        desc(PlatformMessageHistory.created_at),
++                        desc(PlatformMessageHistory.id),
++                    )
++                    .limit(limit)
++                )
++                records = list(result.scalars().all())
++            records.reverse()
++            return records, len(records)
+ 
+         for user_id in user_candidates:
+             try:
+@@ -1027,6 +1077,9 @@
+             extra_parts=extra_parts,
+             conversation=conversation,
+         )
++        if event is not None:
++            event.set_extra("provider_request", req)
++            event.set_extra("selected_provider", provider.meta().id)
+ 
+         # 前置钩子：允许其他插件追加系统提示、注入工具、改写上下文等。
+         try:
+@@ -1040,7 +1093,7 @@
+ 
+         llm_response_obj = None
+         try:
+-            llm_response_obj = await self._invoke_provider(provider, req)
++            llm_response_obj = await self._invoke_provider(provider, req, event)
+             logger.info("[主动消息] 调用 LLM 成功喵。")
+             if self.telemetry and self.telemetry.enabled:
+                 self._track_task(
+@@ -1222,16 +1275,60 @@
+             return None
+         return set(params.keys())
+ 
+-    async def _invoke_provider(self, provider: Any, req: Any) -> Any:
++    async def _invoke_provider(
++        self, provider: Any, req: Any, event: Any = None
++    ) -> Any:
+         """调用 Provider，并按运行时能力裁剪不支持的可选参数。
+ 
+         Args:
+             provider: Provider 实例。
+             req: ProviderRequest。
++            event: Shared proactive event used by approved plugin tools.
+ 
+         Returns:
+             LLMResponse。
+         """
++        if getattr(req, "func_tool", None):
++            if event is None:
++                raise ValueError("Proactive tool requests require a message event.")
++            from astrbot.core.agent.hooks import BaseAgentRunHooks
++            from astrbot.core.agent.runners.tool_loop_agent_runner import (
++                ToolLoopAgentRunner,
++            )
++            from astrbot.core.astr_agent_context import (
++                AgentContextWrapper,
++                AstrAgentContext,
++            )
++            from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
++
++            # Keep the original request (including model and temporary content).
++            # Context.tool_loop_agent currently rebuilds it without req.model.
++            runner = ToolLoopAgentRunner()
++            await runner.reset(
++                provider=provider,
++                request=req,
++                run_context=AgentContextWrapper(
++                    context=AstrAgentContext(context=self.context, event=event),
++                    tool_call_timeout=120,
++                ),
++                tool_executor=FunctionToolExecutor(),
++                agent_hooks=BaseAgentRunHooks(),
++                streaming=False,
++            )
++            async for _ in runner.step_until_done(8):
++                pass
++            response = runner.get_final_llm_resp()
++            if (
++                response is None
++                or response.role == "tool"
++                or (
++                    not response.completion_text
++                    and not getattr(response.result_chain, "chain", None)
++                )
++            ):
++                raise RuntimeError("Proactive tool loop produced no final response.")
++            return response
++
+         call_kwargs: dict[str, Any] = {
+             "prompt": getattr(req, "prompt", None),
+             "contexts": getattr(req, "contexts", None),
+diff --git a/core/message_sender.py b/core/message_sender.py
+--- a/core/message_sender.py
++++ b/core/message_sender.py
+@@ -340,7 +340,7 @@
+         if not parsed:
+             return
+ 
+-        platform_id, _message_type, target_id = parsed
++        platform_id, _message_type, _target_id = parsed
+         if platform_id == "webchat":
+             # webchat 适配器自身负责持久化，重复写入会产生重复记录。
+             return
+@@ -366,13 +366,13 @@
+ 
+             await history_mgr.insert(
+                 platform_id=platform_id,
+-                user_id=target_id,
++                user_id=session_id,
+                 content={"type": "bot", "message": message_parts},
+                 sender_id="bot",
+                 sender_name="bot",
+             )
+             logger.debug(
+-                f"[主动消息] 已将主动消息补写入平台 ({platform_id}) 的流水喵，会话标识为 {target_id}。"
++                f"[主动消息] 已将主动消息补写入平台 ({platform_id}) 的流水喵，会话标识为 {session_id}。"
+             )
+         except Exception as e:
+             logger.warning(f"[主动消息] 补写平台流水失败喵: {e}", exc_info=True)
+diff --git a/tests/test_bridge_sessions.py b/tests/test_bridge_sessions.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_bridge_sessions.py
+@@ -0,0 +1,229 @@
++"""Exercise shared group scheduling with real AstrBot events and timers."""
++
++from __future__ import annotations
++
++import asyncio
++import importlib.util
++import os
++import tempfile
++import time
++import unittest
++from datetime import UTC
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++_runtime = tempfile.TemporaryDirectory()
++os.environ.setdefault("ASTRBOT_ROOT", _runtime.name)
++
++from apscheduler.schedulers.asyncio import AsyncIOScheduler
++from astrbot.core.message.components import Plain
++from astrbot.core.platform.astr_message_event import AstrMessageEvent
++from astrbot.core.platform.astrbot_message import (
++    AstrBotMessage,
++    Group,
++    MessageMember,
++)
++from astrbot.core.platform.message_type import MessageType
++from astrbot.core.platform.platform import PlatformStatus
++from astrbot.core.platform.platform_metadata import PlatformMetadata
++
++ROOT = Path(__file__).resolve().parents[1]
++
++
++def load(name: str):
++    spec = importlib.util.spec_from_file_location(name, ROOT / "core" / f"{name}.py")
++    module = importlib.util.module_from_spec(spec)
++    spec.loader.exec_module(module)
++    return module
++
++
++class Harness(
++    load("session_parser").SessionMixin,
++    load("data_storage").StorageMixin,
++    load("session_config").ConfigMixin,
++    load("task_scheduler").SchedulerMixin,
++    load("message_events").EventsMixin,
++    load("plugin_lifecycle").LifecycleMixin,
++):
++    def _track_task(self, task):
++        self.tasks.add(task)
++        return task
++
++    async def check_and_chat(self, session_id):
++        raise AssertionError("Tests must never dispatch a message")
++
++
++def event(sender: str, group: str = "456") -> AstrMessageEvent:
++    message = AstrBotMessage()
++    message.type = MessageType.GROUP_MESSAGE
++    message.group = Group(group_id=group)
++    message.sender = MessageMember(user_id=sender, nickname=f"Member-{sender}")
++    message.self_id = "321"
++    message.message = [Plain("hello")]
++    message.message_id = "test"
++    message.message_str = "hello"
++    return AstrMessageEvent(
++        "hello",
++        message,
++        PlatformMetadata("aiocqhttp", "test", "test"),
++        f"{sender}_{group}",
++    )
++
++
++class GroupSchedulingTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.plugin = p = Harness()
++        p.context = SimpleNamespace(
++            platform_manager=SimpleNamespace(
++                get_insts=lambda: [
++                    SimpleNamespace(
++                        meta=lambda: PlatformMetadata("aiocqhttp", "test", "test"),
++                        status=PlatformStatus.RUNNING,
++                    ),
++                    SimpleNamespace(
++                        meta=lambda: PlatformMetadata("slack", "other", "other"),
++                        status=PlatformStatus.RUNNING,
++                    ),
++                ]
++            )
++        )
++        p.config = {
++            "group_settings": {
++                "enable": True,
++                "session_list": ["456"],
++                "group_idle_trigger_minutes": 30,
++                "auto_trigger_settings": {
++                    "enable_auto_trigger": True,
++                    "auto_trigger_after_minutes": 15,
++                },
++                "schedule_settings": {
++                    "min_interval_minutes": 90,
++                    "max_interval_minutes": 90,
++                },
++            }
++        }
++        p.session_override_manager = None
++        p.session_data = {}
++        p.last_message_times = {}
++        p.session_temp_state = {}
++        p.first_message_logged = set()
++        p.group_timers = {}
++        p.auto_trigger_timers = {}
++        p.tasks = set()
++        p._cleanup_counter = 0
++        p.data_lock = asyncio.Lock()
++        p._save_data_internal = AsyncMock()
++        p.plugin_start_time = time.time() - 1
++        p.timezone = UTC
++        p.scheduler = AsyncIOScheduler(timezone=UTC)
++        p.scheduler.start(paused=True)
++        p._terminating = False
++        p._startup_task = p._heartbeat_task = None
++        p.telemetry = p.web_admin_server = p.notification_center = None
++        p._exception_handler_installed = False
++
++    async def asyncTearDown(self):
++        if not self.plugin._terminating:
++            await self.plugin.terminate()
++        for task in self.plugin.tasks:
++            if not task.done():
++                task.cancel()
++        await asyncio.gather(*self.plugin.tasks, return_exceptions=True)
++        await asyncio.sleep(0)
++
++    async def test_members_share_timer_without_changing_chat_isolation(self):
++        p = self.plugin
++        key = "test:GroupMessage:456"
++        await p._setup_auto_trigger(key)
++        auto_timer = p.auto_trigger_timers[key]
++        first = event("123")
++        await p.on_group_message(first)
++        first_timer = p.group_timers[key]
++        self.assertTrue(auto_timer.cancelled())
++        self.assertEqual(first.unified_msg_origin, "test:GroupMessage:123_456")
++        second = event("999")
++        await p.on_group_message(second)
++        self.assertTrue(first_timer.cancelled())
++        self.assertEqual(set(p.group_timers), {key})
++        self.assertEqual(set(p.session_data), {key})
++        self.assertEqual(p.session_data[key]["last_sender_id"], "999")
++        self.assertEqual(second.unified_msg_origin, "test:GroupMessage:999_456")
++
++        await p._handle_group_silence_callback(key, 30)
++        await asyncio.gather(*p.tasks)
++        self.assertEqual([job.id for job in p.scheduler.get_jobs()], [key])
++        self.assertEqual(p.scheduler.get_job(key).args, (key,))
++        await p.on_group_message(event("123"))
++        self.assertEqual(p.scheduler.get_jobs(), [])
++        self.assertNotIn("next_trigger_time", p.session_data[key])
++        self.assertEqual(p.session_data[key]["unanswered_count"], 0)
++
++    async def test_unconfigured_group_and_bot_do_not_start_timers(self):
++        await self.plugin.on_group_message(event("123", "999"))
++        await self.plugin.on_group_message(event("321"))
++        self.assertEqual(self.plugin.group_timers, {})
++        self.assertEqual(self.plugin.scheduler.get_jobs(), [])
++
++    async def test_bot_reply_resets_same_shared_timer(self):
++        p = self.plugin
++        await p.on_group_message(event("123"))
++        key = "test:GroupMessage:456"
++        previous = p.group_timers[key]
++        await p.on_after_message_sent(event("999"))
++        self.assertTrue(previous.cancelled())
++        self.assertEqual(set(p.group_timers), {key})
++
++    async def test_migration_preserves_latest_speaker_in_either_order(self):
++        p = self.plugin
++        for entries in [
++            [("123", 10, "Alpha"), ("999", 20, "Beta")],
++            [("999", 20, "Beta"), ("123", 10, "Alpha")],
++        ]:
++            p.session_data = {
++                f"test:GroupMessage:{sender}_456": {
++                    "last_message_time": stamp,
++                    "last_sender_id": sender,
++                    "last_sender_name": name,
++                    "self_id": "321",
++                }
++                for sender, stamp, name in entries
++            }
++            self.assertTrue(p._normalize_session_data())
++            self.assertEqual(list(p.session_data), ["test:GroupMessage:456"])
++            merged = p.session_data["test:GroupMessage:456"]
++            self.assertEqual(merged["last_message_time"], 20)
++            self.assertEqual(merged["last_sender_id"], "999")
++            self.assertEqual(merged["last_sender_name"], "Beta")
++            self.assertFalse(p._normalize_session_data())
++
++    async def test_non_onebot_and_private_ids_are_unchanged(self):
++        for key in (
++            "other:GroupMessage:123_456",
++            "test:FriendMessage:123_456",
++            "test:GuildMessage:123_456",
++            "test:GroupMessage:a_b",
++            "test:GroupMessage:123_456_999",
++            "test:GroupMessage:456",
++        ):
++            self.assertEqual(self.plugin._normalize_session_id(key), key)
++
++    async def test_disable_cancels_timers_and_blocks_late_callbacks(self):
++        p = self.plugin
++        key = "test:GroupMessage:456"
++        await p.on_group_message(event("123"))
++        timer = p.group_timers[key]
++        await p._schedule_next_chat_and_save(key)
++        self.assertEqual(len(p.scheduler.get_jobs()), 1)
++        await p.terminate()
++        self.assertTrue(timer.cancelled())
++        self.assertEqual(p.group_timers, {})
++        self.assertEqual(p.scheduler.get_jobs(), [])
++        await p._handle_group_silence_callback(key, 30)
++        await p._handle_auto_trigger_callback(key, 15)
++        await p._schedule_next_chat_and_save(key)
++        self.assertEqual(p.scheduler.get_jobs(), [])
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/tests/test_proactive_llm.py b/tests/test_proactive_llm.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_proactive_llm.py
+@@ -0,0 +1,318 @@
++"""Validate proactive hooks, tool rounds and history scopes without network calls."""
++
++import atexit
++import importlib
++import os
++import sys
++import tempfile
++import unittest
++from copy import deepcopy
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++RUNTIME = tempfile.TemporaryDirectory(prefix="proactive-llm-test-")
++atexit.register(RUNTIME.cleanup)
++os.environ["ASTRBOT_ROOT"] = RUNTIME.name
++sys.dont_write_bytecode = True
++CORE = Path(os.environ["ASTRBOT_CORE"])
++SOURCE = CORE / "data/plugins/astrbot_plugin_proactive_chat"
++PATCHED = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(CORE))
++package = ModuleType("proactive_test")
++package.__path__ = [str(PATCHED), str(SOURCE)]
++sys.modules[package.__name__] = package
++core_package = ModuleType("proactive_test.core")
++core_package.__path__ = [str(PATCHED / "core"), str(SOURCE / "core")]
++sys.modules[core_package.__name__] = core_package
++
++from astrbot.api.provider import LLMResponse, ProviderRequest
++from astrbot.core.agent.message import TextPart
++from astrbot.core.agent.tool import FunctionTool, ToolSet
++from astrbot.core.db.po import PlatformMessageHistory
++from astrbot.core.message.components import Plain
++from astrbot.core.message.message_event_result import MessageChain
++from astrbot.core.platform.platform import PlatformStatus
++from astrbot.core.platform.platform_metadata import PlatformMetadata
++from astrbot.core.provider.provider import Provider
++from astrbot.core.star.context import Context
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++
++llm_module = importlib.import_module("proactive_test.core.llm_adapter")
++sender_module = importlib.import_module("proactive_test.core.message_sender")
++event_module = importlib.import_module("proactive_test.core.proactive_event")
++parser_module = importlib.import_module("proactive_test.core.session_parser")
++
++
++class ScriptedProvider(Provider):
++    def __init__(self, responses):
++        super().__init__(
++            {"id": "fake", "type": "fake", "modalities": ["text", "tool_use"]}, {}
++        )
++        self.responses = list(responses)
++        self.calls = []
++
++    def get_current_key(self):
++        return ""
++
++    def set_key(self, key):
++        pass
++
++    async def get_models(self):
++        return ["fake"]
++
++    def meta(self):
++        return SimpleNamespace(id="fake", model="fake")
++
++    async def text_chat(self, **kwargs):
++        self.calls.append(
++            deepcopy(
++                {
++                    key: kwargs[key]
++                    for key in (
++                        "prompt",
++                        "contexts",
++                        "model",
++                        "extra_user_content_parts",
++                        "tool_calls_result",
++                    )
++                    if key in kwargs
++                }
++            )
++        )
++        response = self.responses.pop(0)
++        if isinstance(response, Exception):
++            raise response
++        return response
++
++
++class Harness(
++    parser_module.SessionMixin, llm_module.LlmMixin, sender_module.SenderMixin
++):
++    def __init__(self, platform_id="test", platform_name="aiocqhttp"):
++        self.context = Context.__new__(Context)
++        self.context.get_config = lambda **kwargs: {}
++        self.context.platform_manager = SimpleNamespace(
++            get_insts=lambda: [
++                SimpleNamespace(
++                    meta=lambda: PlatformMetadata(
++                        name=platform_name, description="test", id=platform_id
++                    ),
++                    status=PlatformStatus.RUNNING,
++                )
++            ]
++        )
++        self.session_data = {}
++        self.telemetry = None
++        self.data_dir = RUNTIME.name
++        from zoneinfo import ZoneInfo
++
++        self.timezone = ZoneInfo("Asia/Shanghai")
++
++    def _get_session_config(self, sid):
++        return {}
++
++
++def tool_response(value=1):
++    return LLMResponse(
++        role="tool",
++        completion_text="",
++        tools_call_name=["echo"],
++        tools_call_args=[{"value": value}],
++        tools_call_ids=[f"call-{value}"],
++    )
++
++
++class ProactiveLlmTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.plugin = Harness()
++        self.event = event_module.build_proactive_event_for_session(
++            plugin=self.plugin, session_id="test:GroupMessage:456"
++        )
++
++    def request(self, handler):
++        return ProviderRequest(
++            prompt="hello",
++            model="override-model",
++            system_prompt="persona",
++            extra_user_content_parts=[TextPart(text="temporary").mark_as_temp()],
++            func_tool=ToolSet(
++                tools=[
++                    FunctionTool(
++                        name="echo",
++                        description="echo",
++                        parameters={
++                            "type": "object",
++                            "properties": {"value": {"type": "integer"}},
++                            "required": ["value"],
++                        },
++                        handler=handler,
++                    )
++                ]
++            ),
++        )
++
++    async def test_actual_tool_executor_runs_two_rounds_and_preserves_request(self):
++        calls = []
++
++        async def echo(event, value):
++            self.assertIs(event, self.event)
++            calls.append(value)
++            return f"echo-{value}"
++
++        provider = ScriptedProvider(
++            [
++                tool_response(1),
++                tool_response(2),
++                LLMResponse(role="assistant", completion_text="done"),
++            ]
++        )
++        req = self.request(echo)
++        response = await self.plugin._invoke_provider(provider, req, self.event)
++        self.assertEqual(response.completion_text, "done")
++        self.assertEqual(calls, [1, 2])
++        self.assertEqual(len(provider.calls), 3)
++        self.assertTrue(
++            all(call["model"] == "override-model" for call in provider.calls)
++        )
++        self.assertIn("temporary", str(provider.calls[0]))
++        self.assertIn("echo-1", str(provider.calls[1]))
++        self.assertIn("echo-2", str(provider.calls[2]))
++        self.assertFalse(self.event.proactive_sent_chains)
++
++    async def test_tool_failure_is_returned_to_model_without_claimed_success(self):
++        async def broken(event, value):
++            raise ValueError("fixture tool failed")
++
++        provider = ScriptedProvider(
++            [
++                tool_response(),
++                LLMResponse(role="assistant", completion_text="tool failed"),
++            ]
++        )
++        result = await self.plugin._invoke_provider(
++            provider, self.request(broken), self.event
++        )
++        self.assertEqual(result.completion_text, "tool failed")
++        self.assertIn("fixture tool failed", str(provider.calls[1]))
++        self.assertFalse(self.event.proactive_sent_chains)
++
++    async def test_missing_final_response_raises(self):
++        async def echo(event, value):
++            return "ok"
++
++        provider = ScriptedProvider([tool_response(i) for i in range(20)])
++        with self.assertRaisesRegex(RuntimeError, "no final response"):
++            await self.plugin._invoke_provider(provider, self.request(echo), self.event)
++        self.assertLessEqual(len(provider.calls), 9)
++
++    async def test_hooks_see_plugin_origin_and_same_request(self):
++        seen = []
++        provider = ScriptedProvider(
++            [LLMResponse(role="assistant", completion_text="hello")]
++        )
++        self.plugin._resolve_chat_provider = AsyncMock(return_value=provider)
++
++        async def hook(event, hook_type, *args):
++            req = event.get_extra("provider_request")
++            self.assertIsInstance(req, ProviderRequest)
++            self.assertEqual(event.get_extra("selected_provider"), "fake")
++            if args and isinstance(args[0], ProviderRequest):
++                self.assertIs(req, args[0])
++                req.model = "hook-model"
++            seen.append(hook_type)
++            return False
++
++        with patch.object(llm_module, "dispatch_event_hook", side_effect=hook):
++            response, _ = await self.plugin._generate_llm_response(
++                "test:GroupMessage:456",
++                {"proactive_prompt": "hello"},
++                [],
++                "persona",
++                0,
++                event=self.event,
++            )
++        self.assertEqual(response.completion_text, "hello")
++        self.assertEqual(len(seen), 3)
++        self.assertEqual(provider.calls[0]["model"], "hook-model")
++
++
++class HistoryScopeTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.engine = create_async_engine("sqlite+aiosqlite:///:memory:")
++        async with self.engine.begin() as conn:
++            await conn.run_sync(PlatformMessageHistory.__table__.create)
++        self.sessions = async_sessionmaker(self.engine, expire_on_commit=False)
++        self.plugin = Harness(platform_id="test_%")
++        self.plugin.context.message_history_manager = SimpleNamespace(
++            db=SimpleNamespace(get_db=self.sessions), get=AsyncMock(return_value=[])
++        )
++        scopes = [
++            ("test_%", "test_%:GroupMessage:456"),
++            ("test_%", "test_%:GroupMessage:123_456"),
++            ("test_%", "test_%:GroupMessage:999_456"),
++            ("test_%", "test_%:GroupMessage:123_4567"),
++            ("test_%", "test_%:GroupMessage:123_1456"),
++            ("test_%", "test_%:FriendMessage:123_456"),
++            ("other", "test_%:GroupMessage:123_456"),
++            ("test_%", "testABC:GroupMessage:123_456"),
++            ("test_%", "456"),
++        ]
++        async with self.sessions() as session:
++            for index, (platform, scope) in enumerate(scopes):
++                session.add(
++                    PlatformMessageHistory(
++                        platform_id=platform,
++                        user_id=scope,
++                        sender_id="123",
++                        content={"message": [{"type": "text", "text": f"row-{index}"}]},
++                    )
++                )
++            await session.commit()
++
++    async def asyncTearDown(self):
++        await self.engine.dispose()
++
++    async def test_group_history_merges_members_without_cross_scope_reads(self):
++        records, count = await self.plugin._load_platform_message_history_records(
++            "test_%:GroupMessage:456", 20
++        )
++        self.assertEqual(count, 3)
++        self.assertEqual([record.id for record in records], [1, 2, 3])
++        records, count = await self.plugin._load_platform_message_history_records(
++            "test_%:GroupMessage:456", 2
++        )
++        self.assertEqual(count, 2)
++        self.assertEqual([record.id for record in records], [2, 3])
++
++    async def test_other_platform_does_not_apply_qq_member_pattern(self):
++        other = Harness(platform_id="test_%", platform_name="telegram")
++        other.context.message_history_manager = (
++            self.plugin.context.message_history_manager
++        )
++        records, count = await other._load_platform_message_history_records(
++            "test_%:GroupMessage:456", 20
++        )
++        self.assertEqual(count, 1)
++        self.assertEqual(records[0].id, 1)
++
++    async def test_sent_history_keeps_complete_umo(self):
++        manager = self.plugin.context.message_history_manager
++        manager.db.insert_attachment = AsyncMock()
++        manager.insert = AsyncMock()
++        with patch.object(
++            sender_module,
++            "message_chain_to_storage_message_parts",
++            AsyncMock(return_value=[{"type": "text", "text": "hello"}]),
++        ):
++            await self.plugin._persist_proactive_message_to_platform_history(
++                "test_%:GroupMessage:456", MessageChain([Plain(text="hello")])
++            )
++        self.assertEqual(
++            manager.insert.await_args.kwargs["user_id"], "test_%:GroupMessage:456"
++        )
++        self.assertEqual(manager.insert.await_args.kwargs["platform_id"], "test_%")
++
++
++if __name__ == "__main__":
++    unittest.main()

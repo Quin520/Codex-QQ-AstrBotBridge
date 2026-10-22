@@ -1,0 +1,117 @@
+diff --git a/core/memory_scope.py b/core/memory_scope.py
+--- a/core/memory_scope.py
++++ b/core/memory_scope.py
+@@ -112,12 +112,19 @@
+     platform = _event_value(event, "get_platform_name", "platform")
+     session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
+     group_id = _event_value(event, "get_group_id", "group_id")
++    platform_id = _event_value(event, "get_platform_id", "platform_id")
++    # A canonical group UMO matches every isolated member session while keeping
++    # private users, other groups and other platform instances out of the list.
++    group_scope = (
++        f"{platform_id}:GroupMessage:{group_id}" if platform_id and group_id else ""
++    )
+     identity = resolve_event_identity(config, event)
+     candidates = {
+         sender_id,
+         identity,
+         session_id,
+         group_id,
++        group_scope,
+         f"{platform}:{sender_id}" if platform and sender_id else "",
+     }
+     return any(
+diff --git a/tests/test_bridge_memory_scope.py b/tests/test_bridge_memory_scope.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_bridge_memory_scope.py
+@@ -0,0 +1,89 @@
++"""Verify canonical group allowlists against real isolated AstrBot events."""
++
++import importlib.util
++import os
++import tempfile
++import unittest
++from pathlib import Path
++
++_runtime = tempfile.TemporaryDirectory()
++os.environ.setdefault("ASTRBOT_ROOT", _runtime.name)
++
++from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType  # noqa: E402
++from astrbot.core.platform.astr_message_event import AstrMessageEvent  # noqa: E402
++from astrbot.core.platform.platform_metadata import PlatformMetadata  # noqa: E402
++
++source = Path(__file__).resolve().parents[1] / "core/memory_scope.py"
++spec = importlib.util.spec_from_file_location("memory_scope_under_test", source)
++scope = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(scope)
++
++
++def event(sender, group="", platform="test"):
++    message = AstrBotMessage()
++    message.type = MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
++    message.group_id = group
++    message.sender = MessageMember(user_id=sender, nickname="Fictional member")
++    session = f"{sender}_{group}" if group else sender
++    return AstrMessageEvent(
++        "hello", message, PlatformMetadata("aiocqhttp", "test", platform), session
++    )
++
++
++class CanonicalGroupAllowlistTests(unittest.TestCase):
++    def setUp(self):
++        self.config = {
++            "access_control": {
++                "whitelist_enabled": True,
++                "allowed_ids": "test:GroupMessage:456\ntest:FriendMessage:123",
++            },
++            "filtering_settings": {
++                "memory_scope_mode": "session",
++                "use_session_filtering": True,
++            },
++        }
++
++    def test_both_members_allowed_without_rewriting_isolated_scope(self):
++        for sender in ("123", "999"):
++            current = event(sender, "456")
++            original = current.unified_msg_origin
++            self.assertTrue(scope.is_event_memory_allowed(self.config, current))
++            self.assertEqual(scope.resolve_memory_scope(self.config, current), original)
++            self.assertEqual(
++                current.unified_msg_origin, f"test:GroupMessage:{sender}_456"
++            )
++
++    def test_private_user_sharing_group_number_is_denied(self):
++        self.assertFalse(scope.is_event_memory_allowed(self.config, event("456")))
++
++    def test_same_numbered_member_in_another_group_is_denied(self):
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("456", "777"))
++        )
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("123", "777"))
++        )
++
++    def test_other_instance_of_same_adapter_is_denied(self):
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("999", "456", "other"))
++        )
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("123", platform="other"))
++        )
++
++    def test_only_owner_private_session_is_allowed(self):
++        current = event("123")
++        self.assertTrue(scope.is_event_memory_allowed(self.config, current))
++        self.assertEqual(
++            scope.resolve_memory_scope(self.config, current), "test:FriendMessage:123"
++        )
++        self.assertFalse(scope.is_event_memory_allowed(self.config, event("999")))
++
++    def test_legacy_bare_ids_still_work_if_explicitly_selected(self):
++        self.config["access_control"]["allowed_ids"] = "456"
++        self.assertTrue(scope.is_event_memory_allowed(self.config, event("999", "456")))
++
++
++if __name__ == "__main__":
++    unittest.main()

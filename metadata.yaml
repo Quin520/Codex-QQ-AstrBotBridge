@@ -1,7 +1,7 @@
 name: astrbot_plugin_local_codex
 display_name: 本机 Codex 桥接
 desc: 本机 Codex 接入 AstrBot 插件、人格和工具，支持按 QQ 自定义相处方式、学习建议审批、固定角色表达、Fast 模式与独立会话。
-version: v0.3.6
+version: v0.3.7
 author: Quin520
 repo: https://github.com/Quin520/Codex-QQ-AstrBotBridge
 astrbot_version: ">=4.29.1,<5"

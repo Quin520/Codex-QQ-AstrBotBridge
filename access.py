@@ -6,6 +6,7 @@ from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
 
 PUBLIC_PLUGIN_TOOLS = {
     "astrbot_plugin_listen_music": {"find_music", "deliver_music", "search_music"},
+    "astrbot_plugin_livingmemory": {"recall_long_term_memory"},
     "meme_manager": {"search_memes"},
 }
 

@@ -15,6 +15,8 @@ from astrbot.api.star import StarTools
 from astrbot.core.provider.entities import ToolCallsResult
 from astrbot.core.provider.register import provider_cls_map, register_provider_adapter
 from astrbot.core.utils.media_utils import resolve_media_ref_to_base64_data
+from jsonschema.protocols import Validator
+from referencing import Registry
 
 from .runner import CodexRunner
 
@@ -41,6 +43,92 @@ Include ordinary source URLs in your answer, not internal citation tokens.
 Never invent search results or claim to have searched if the search failed.
 This enables public web research only, not local files, shell, apps or computer use.
 """
+STRUCTURED_INSTRUCTIONS = """This request includes response_format for the final answer.
+Keep the outer transport object and its answer string/tool_calls array unchanged.
+When no tool call is needed, answer must contain only a JSON document matching
+response_format: an object for json_object, or the exact supplied json_schema
+(which can also require an array). Encode that document inside the answer string.
+Do not include Markdown fences, explanations, or text before or after that JSON.
+When requesting a listed AstrBot tool, leave answer empty as usual; the final
+answer after the tool result must still satisfy response_format.
+"""
+
+
+def _response_validator(response_format: dict | None) -> Validator | None:
+    """Validate the requested JSON format before spending a model request.
+
+    Schema references may use local fragments only. A plugin's output constraint
+    must never cause the validator to retrieve files or remote schema resources.
+    """
+    if response_format is None:
+        return None
+    if not isinstance(response_format, dict):
+        raise TypeError("response_format must be an object.")
+    kind = response_format.get("type")
+    if kind == "text":
+        return None
+    if kind == "json_object":
+        schema = {"type": "object"}
+    elif kind == "json_schema":
+        specification = response_format.get("json_schema")
+        if not isinstance(specification, dict) or not isinstance(
+            specification.get("schema"), dict
+        ):
+            raise ValueError("response_format.json_schema.schema must be an object.")
+        schema = copy.deepcopy(specification["schema"])
+    else:
+        raise ValueError(f"Unsupported response_format type: {kind!r}.")
+    json.dumps(schema, allow_nan=False)
+    pending = [schema]
+    while pending:
+        node = pending.pop()
+        if isinstance(node, dict):
+            for key in ("$ref", "$dynamicRef", "$recursiveRef"):
+                reference = node.get(key)
+                if reference is not None and (
+                    not isinstance(reference, str) or not reference.startswith("#")
+                ):
+                    raise ValueError(
+                        "response_format permits only local schema references."
+                    )
+            # Only visit schema-valued keywords. Property names and values in
+            # const/enum/default/examples are user data, even when named $ref.
+            for key in (
+                "$defs",
+                "definitions",
+                "properties",
+                "patternProperties",
+                "dependentSchemas",
+                "dependencies",
+            ):
+                children = node.get(key)
+                if isinstance(children, dict):
+                    pending.extend(children.values())
+            for key in (
+                "additionalProperties",
+                "additionalItems",
+                "unevaluatedProperties",
+                "unevaluatedItems",
+                "contains",
+                "propertyNames",
+                "not",
+                "if",
+                "then",
+                "else",
+                "contentSchema",
+                "items",
+                "prefixItems",
+                "allOf",
+                "anyOf",
+                "oneOf",
+            ):
+                pending.append(node.get(key))
+        elif isinstance(node, list):
+            pending.extend(node)
+    validator_class = jsonschema.validators.validator_for(schema)
+    validator_class.check_schema(schema)
+    # Explicitly disable jsonschema's legacy remote-resource fallback as well.
+    return validator_class(schema, registry=Registry())
 
 
 class LocalCodexProvider(Provider):
@@ -133,6 +221,7 @@ class LocalCodexProvider(Provider):
         model=None,
         extra_user_content_parts=None,
         tool_choice="auto",
+        response_format=None,
         **kwargs,
     ) -> LLMResponse:
         """Translate a model turn into validated text or AstrBot tool calls.
@@ -149,6 +238,7 @@ class LocalCodexProvider(Provider):
             model: Optional model override.
             extra_user_content_parts: Plugin context appended to the user message.
             tool_choice: Whether a tool call is required.
+            response_format: OpenAI-style text, json_object, or json_schema output.
             kwargs: Additional AstrBot provider arguments.
 
         Returns:
@@ -156,6 +246,7 @@ class LocalCodexProvider(Provider):
         """
         if audio_urls:
             raise ValueError("Local Codex requires an AstrBot STT provider for audio.")
+        response_validator = _response_validator(response_format)
         messages = copy.deepcopy(self._ensure_message_to_dicts(contexts))
         if system_prompt:
             messages.insert(0, {"role": "system", "content": system_prompt})
@@ -228,6 +319,8 @@ class LocalCodexProvider(Provider):
                     ],
                     "tool_choice": tool_choice,
                 }
+                if response_validator is not None:
+                    request["response_format"] = response_format
                 schema_path = directory / "response-schema.json"
                 schema_path.write_text(json.dumps(schema), encoding="utf-8")
                 selected_model = model or self.get_model()
@@ -252,6 +345,11 @@ class LocalCodexProvider(Provider):
                     runner.run(
                         INSTRUCTIONS
                         + (SEARCH_INSTRUCTIONS if runner.web_search else "")
+                        + (
+                            STRUCTURED_INSTRUCTIONS
+                            if response_validator is not None
+                            else ""
+                        )
                         + "\n"
                         + json.dumps(request, ensure_ascii=False),
                         None,
@@ -285,6 +383,11 @@ class LocalCodexProvider(Provider):
             arguments.append(value)
         if not calls and not payload["answer"].strip():
             raise ValueError("Codex returned neither an answer nor a tool call.")
+        if not calls and response_validator is not None:
+            structured_answer = json.loads(payload["answer"])
+            # Python's decoder accepts NaN/Infinity; those are not valid JSON.
+            json.dumps(structured_answer, allow_nan=False)
+            response_validator.validate(structured_answer)
         return LLMResponse(
             role="tool" if calls else "assistant",
             completion_text="" if calls else payload["answer"],
