@@ -9,7 +9,7 @@ import unittest
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.core.agent.hooks import BaseAgentRunHooks
@@ -27,6 +27,7 @@ from astrbot_plugin_local_codex.provider import (
     LocalCodexProvider,
 )
 from astrbot_plugin_local_codex.singing import SingingService
+from astrbot_plugin_local_codex.voice import VoiceService
 
 from .test_bridge import event_for
 
@@ -66,7 +67,7 @@ class SingingServiceTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 self.released.append(search_id)
 
-        async def render(source, directory):
+        async def render(source, directory, *, mode="cover"):
             self.assertEqual(source.read_bytes(), self.source.read_bytes())
             self.assertEqual(self.released, [lease[2] for lease in self.leases])
             self.jobs.append(directory)
@@ -369,6 +370,194 @@ class SingingServiceTests(unittest.IsolatedAsyncioTestCase):
                     )
                 kill.assert_awaited_once()
                 self.assertIsNone(self.service._process)
+
+    async def test_character_speech_is_independent_of_cover_switch_and_cleans_after_use(
+        self,
+    ):
+        self.config["singing_enabled"] = False
+        async with self.service.converted_speech(self.source) as output:
+            self.assertTrue(output.is_file())
+            self.assertEqual(output.read_bytes(), b"ID3 isolated converted audio")
+            self.assertTrue(self.service._lock.locked())
+            self.assertIs(self.service._active_task, asyncio.current_task())
+            copied, directory = self.service._render.call_args.args
+            self.assertEqual(copied.parent, directory)
+            self.assertEqual(copied.read_bytes(), self.source.read_bytes())
+            self.assertEqual(self.service._render.call_args.kwargs, {"mode": "speech"})
+        self.assertFalse(output.exists())
+        self.assertTrue(self.source.exists())
+        self.assertIsNone(self.service._active_task)
+        self.assertFalse(self.service._lock.locked())
+        self.prepare.assert_not_called()
+
+    async def test_voice_service_converts_with_shared_singing_service_before_sending(
+        self,
+    ):
+        self.config.update(voice_enabled=True, voice_use_rvc=True)
+        provider = SimpleNamespace(get_audio=AsyncMock(return_value=str(self.source)))
+        self.context.get_using_tts_provider_async = AsyncMock(return_value=provider)
+        voice = VoiceService(self.context, self.config, converter=self.service)
+        event = self.event()
+
+        async def deliver(result):
+            path = Path(result.chain[0].path)
+            self.assertEqual(path.read_bytes(), b"ID3 isolated converted audio")
+            self.assertNotEqual(path, self.source)
+            self.assertTrue(self.service._lock.locked())
+
+        event.send.side_effect = deliver
+        self.assertIn("已发送", await voice.send(event, "生日快乐"))
+        provider.get_audio.assert_awaited_once_with("生日快乐")
+        event.send.assert_awaited_once()
+        self.assertEqual(event.get_extra("local_codex_voice_text"), "生日快乐")
+        self.assertFalse(self.jobs[0].exists())
+        self.assertIsNone(self.service._active_task)
+        self.assertFalse(self.service._lock.locked())
+
+    async def test_speech_holds_shared_worker_lock_against_covers_and_other_speech(
+        self,
+    ):
+        async with self.service.converted_speech(self.source):
+            event = self.event()
+            self.assertIn("稍后", await self.service.send(event, "song", 1))
+            with self.assertRaisesRegex(RuntimeError, "正在生成"):
+                async with self.service.converted_speech(self.source):
+                    self.fail("A second RVC job must not enter.")
+            event.send.assert_not_awaited()
+            self.prepare.assert_not_called()
+            self.service._render.assert_awaited_once()
+
+    async def test_cover_holds_shared_worker_lock_against_speech(self):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        render = self.service._render.side_effect
+
+        async def blocking_render(source, directory):
+            entered.set()
+            await release.wait()
+            return await render(source, directory)
+
+        self.service._render.side_effect = blocking_render
+        first = asyncio.create_task(self.service.send(self.event(), "song", 1))
+        await entered.wait()
+        try:
+            with self.assertRaisesRegex(RuntimeError, "正在生成"):
+                async with self.service.converted_speech(self.source):
+                    self.fail("Speech must not queue behind cover rendering.")
+        finally:
+            release.set()
+        self.assertIn("已发送", await first)
+        self.service._render.assert_awaited_once()
+
+    async def test_unconfigured_speech_never_renders(self):
+        self.config["singing_model"] = ""
+        with self.assertRaisesRegex(RuntimeError, "音色模型"):
+            async with self.service.converted_speech(self.source):
+                self.fail("Missing model must not yield the original voice.")
+        self.service._render.assert_not_awaited()
+        self.assertFalse(self.service.data_dir.exists())
+
+    async def test_speech_failure_removes_temporary_job_and_releases_lock(self):
+        for error in (RuntimeError("private worker detail"), TimeoutError()):
+            with self.subTest(error=type(error).__name__):
+                self.service._render.side_effect = error
+                with self.assertRaises(type(error)):
+                    async with self.service.converted_speech(self.source):
+                        self.fail("Failed conversion must not yield audio.")
+                self.assertEqual(list(self.service.data_dir.glob("speech-*")), [])
+                self.assertIsNone(self.service._active_task)
+                self.assertFalse(self.service._lock.locked())
+                self.assertTrue(self.source.exists())
+
+    async def test_stop_cancels_speech_render_and_removes_temporary_source(self):
+        entered = asyncio.Event()
+
+        async def blocking_render(source, directory, *, mode):
+            self.assertEqual(mode, "speech")
+            self.jobs.append(directory)
+            entered.set()
+            await asyncio.Event().wait()
+
+        async def consume():
+            async with self.service.converted_speech(self.source):
+                self.fail("Stopped rendering must not yield audio.")
+
+        self.service._render.side_effect = blocking_render
+        task = asyncio.create_task(consume())
+        await entered.wait()
+        await self.service.stop()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(self.jobs[0].exists())
+        self.assertFalse(self.service._lock.locked())
+        self.assertIsNone(self.service._active_task)
+        self.assertIn("已停止", self.service.speech_error())
+
+    async def test_stop_also_cancels_speech_delivery_before_removing_audio(self):
+        entered = asyncio.Event()
+
+        async def consume():
+            async with self.service.converted_speech(self.source) as output:
+                self.assertTrue(output.exists())
+                entered.set()
+                await asyncio.Event().wait()
+
+        task = asyncio.create_task(consume())
+        await entered.wait()
+        await self.service.stop()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertFalse(self.jobs[0].exists())
+        self.assertFalse(self.service._lock.locked())
+        self.assertIsNone(self.service._active_task)
+
+    async def test_speech_job_uses_independent_pitch_and_bounded_duration(self):
+        self.service.data_dir.mkdir()
+        self.config.update(
+            singing_pitch=12, singing_duration_seconds=30, voice_rvc_pitch=-99
+        )
+        process = SimpleNamespace(returncode=0, wait=AsyncMock(return_value=0))
+
+        async def spawn(*args, **kwargs):
+            job_path = Path(args[args.index("--job") + 1])
+            self.job = json.loads(job_path.read_text(encoding="utf-8"))
+            Path(self.job["output"]).write_bytes(b"ID3 isolated speech output")
+            return process
+
+        work = self.directory / "speech-job"
+        work.mkdir()
+        with patch(
+            "astrbot_plugin_local_codex.singing.asyncio.create_subprocess_exec",
+            side_effect=spawn,
+        ):
+            result = await SingingService._render(
+                self.service, self.source, work, mode="speech"
+            )
+        self.assertEqual(result, work / "cover.mp3")
+        self.assertEqual(self.job["mode"], "speech")
+        self.assertEqual(self.job["pitch"], -12)
+        self.assertEqual(self.job["duration"], 120)
+        self.assertIsNone(self.service._process)
+
+    async def test_injected_source_service_supplies_selected_song_without_default_lookup(
+        self,
+    ):
+        prepared = self.prepare.side_effect
+        self.service.source_service = SimpleNamespace(
+            prepared=Mock(
+                side_effect=lambda event, search_id, position: prepared(
+                    self.context, event, search_id, position
+                )
+            )
+        )
+        event = self.event()
+        self.assertIn("已发送", await self.service.send(event, "fallback-song", 2))
+        self.service.source_service.prepared.assert_called_once_with(
+            event, "fallback-song", 2
+        )
+        self.prepare.assert_not_called()
+        self.assertEqual(self.released, ["fallback-song"])
+        self.assertFalse(self.jobs[0].exists())
 
 
 class SingingToolIntegrationTests(unittest.IsolatedAsyncioTestCase):

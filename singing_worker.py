@@ -1,4 +1,4 @@
-"""Run a bounded cover job with the pinned official RVC offline CLIs.
+"""Run bounded cover or speech jobs with the pinned official RVC offline CLIs.
 
 This worker has only standard-library dependencies. Run it with the isolated
 RVC environment's Python, never AstrBot's Python. Job paths and model settings
@@ -81,6 +81,9 @@ def _load_job(job_path: Path) -> dict:
     device = job.get("device", "cpu")
     if device not in {"cpu", "cuda"}:
         raise ValueError("Device must be cpu or cuda")
+    mode = job.get("mode", "cover")
+    if not isinstance(mode, str) or mode not in {"cover", "speech"}:
+        raise ValueError("Mode must be cover or speech")
     return {
         "root": root,
         "directory": job_dir,
@@ -91,6 +94,7 @@ def _load_job(job_path: Path) -> dict:
         "pitch": _integer(job.get("pitch", 0), "pitch", -12, 12),
         "duration": _integer(job.get("duration", 60), "duration", 30, 120),
         "device": device,
+        "mode": mode,
         "ffmpeg": _executable(job.get("ffmpeg"), "ffmpeg"),
         "ffprobe": _executable(job.get("ffprobe"), "ffprobe"),
     }
@@ -100,14 +104,19 @@ def _preflight(job: dict) -> None:
     root = job["root"]
     required = [
         root / "infer/cli.py",
-        root / "tools/pymss/cli.py",
         root / "assets/hubert_base/config.json",
         root / "assets/hubert_base/preprocessor_config.json",
         root / "assets/hubert_base/pytorch_model.bin",
         root / "assets/rmvpe/rmvpe.pt",
-        root / "assets/pymss_weights" / SEPARATOR_RELATIVE,
-        root / "assets/pymss_weights" / SEPARATOR_RELATIVE.with_suffix(".yaml"),
     ]
+    if job["mode"] == "cover":
+        required.extend(
+            [
+                root / "tools/pymss/cli.py",
+                root / "assets/pymss_weights" / SEPARATOR_RELATIVE,
+                root / "assets/pymss_weights" / SEPARATOR_RELATIVE.with_suffix(".yaml"),
+            ]
+        )
     for path in required:
         _existing_file(str(path), "RVC runtime asset")
     # Every artifact is new for this job; stale stems must never count as success.
@@ -194,12 +203,13 @@ def _audio_duration(path: Path, job: dict, log: BinaryIO) -> float:
 
 def _validate_length(path: Path, expected: float, job: dict, log: BinaryIO) -> None:
     actual = _audio_duration(path, job, log)
-    if abs(actual - expected) > 1:
+    tolerance = 0.25 if job["mode"] == "speech" else 1
+    if abs(actual - expected) > tolerance:
         raise ValueError(f"Unexpected audio duration: {actual}, expected {expected}")
 
 
 def run_job(job_path: Path, log: BinaryIO) -> Path:
-    """Separate, convert and mix a fresh local job; failures never return the song."""
+    """Convert a fresh local job; only covers separate and mix accompaniment."""
     job = _load_job(job_path.resolve())
     _preflight(job)
     directory = job["directory"]
@@ -210,6 +220,11 @@ def run_job(job_path: Path, log: BinaryIO) -> Path:
     converted = directory / "converted.wav"
     pending = directory / "cover.pending.mp3"
     source_duration = _audio_duration(job["source"], job, log)
+    speech = job["mode"] == "speech"
+    if speech and source_duration > job["duration"]:
+        raise ValueError(
+            "Speech source exceeds the duration limit; refusing to truncate"
+        )
     duration = min(source_duration, job["duration"])
     _run(
         [
@@ -223,8 +238,7 @@ def run_job(job_path: Path, log: BinaryIO) -> Path:
             "file,pipe",
             "-i",
             str(job["source"]),
-            "-t",
-            str(job["duration"]),
+            *([] if speech else ["-t", str(job["duration"])]),
             "-map",
             "0:a:0",
             "-vn",
@@ -240,40 +254,43 @@ def run_job(job_path: Path, log: BinaryIO) -> Path:
         log,
     )
     _validate_length(clip, duration, job, log)
-    _run(
-        [
-            sys.executable,
-            "-m",
-            "tools.pymss.cli",
-            "infer",
-            SEPARATOR_MODEL,
-            "--model-dir",
-            str(job["root"] / "assets/pymss_weights"),
-            "--input",
-            str(clip),
-            "--output",
-            str(stems),
-            "--device",
-            job["device"],
-            "--device-id",
-            "0",
-            "--format",
-            "wav",
-            "--param",
-            "batch_size=1",
-        ],
-        job,
-        log,
-    )
-    _validate_length(vocals, duration, job, log)
-    _validate_length(instrumental, duration, job, log)
+    voice_input = clip
+    if not speech:
+        _run(
+            [
+                sys.executable,
+                "-m",
+                "tools.pymss.cli",
+                "infer",
+                SEPARATOR_MODEL,
+                "--model-dir",
+                str(job["root"] / "assets/pymss_weights"),
+                "--input",
+                str(clip),
+                "--output",
+                str(stems),
+                "--device",
+                job["device"],
+                "--device-id",
+                "0",
+                "--format",
+                "wav",
+                "--param",
+                "batch_size=1",
+            ],
+            job,
+            log,
+        )
+        _validate_length(vocals, duration, job, log)
+        _validate_length(instrumental, duration, job, log)
+        voice_input = vocals
     command = [
         sys.executable,
         str(job["root"] / "infer/cli.py"),
         "--model",
         str(job["model"]),
         "--input",
-        str(vocals),
+        str(voice_input),
         "--output",
         str(converted),
         "--speaker-id",
@@ -293,16 +310,9 @@ def run_job(job_path: Path, log: BinaryIO) -> Path:
         command.extend(["--index", str(job["index"])])
     _run(command, job, log)
     _validate_length(converted, duration, job, log)
-    _run(
-        [
-            job["ffmpeg"],
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-n",
-            "-i",
-            str(converted),
+    encode_input = ["-map", "0:a:0", "-af", "alimiter=limit=0.95"]
+    if not speech:
+        encode_input = [
             "-i",
             str(instrumental),
             "-filter_complex",
@@ -314,6 +324,18 @@ def run_job(job_path: Path, log: BinaryIO) -> Path:
             "[a]",
             "-t",
             str(job["duration"]),
+        ]
+    _run(
+        [
+            job["ffmpeg"],
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-n",
+            "-i",
+            str(converted),
+            *encode_input,
             "-ac",
             "2",
             "-ar",

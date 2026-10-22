@@ -95,6 +95,18 @@
     "hint": "默认 300，范围 40–500。Edge TTS 会把这段文字发送至微软在线语音服务，无需 API Key。",
     "default": 300
   },
+  "voice_use_rvc": {
+    "type": "bool",
+    "description": "朗读也使用角色音色",
+    "hint": "先由 TTS 朗读，再用下方配置的 RVC 模型转换音色。与翻唱共用计算任务，失败不会改发原声。需要本机 RVC 环境；单段最长 120 秒。",
+    "default": false
+  },
+  "voice_rvc_pitch": {
+    "type": "int",
+    "description": "角色朗读升降调（半音）",
+    "hint": "默认 0，范围 -12 到 12；独立于翻唱升降调。RVC 改音色，朗读的停顿和语气仍受 TTS 影响。",
+    "default": 0
+  },
   "voice_cooldown_seconds": {
     "type": "int",
     "description": "同一群或私聊的语音间隔（秒）",
@@ -104,7 +116,7 @@
   "singing_enabled": {
     "type": "bool",
     "description": "允许固定角色音色翻唱",
-    "hint": "用户明确要求时，将当前点歌候选转成角色音色后发送语音。需要我想听歌！插件及独立 RVC 环境；没有音色时明确提示，不改播原曲。",
+    "hint": "用户明确要求时，将当前点歌候选转成角色音色后发送语音。需要独立 RVC 环境及可用音源插件；可使用我想听歌！，或开启下方点歌备用源。没有音色时明确提示，不改播原曲。",
     "default": false
   },
   "singing_python": {
@@ -112,6 +124,12 @@
     "description": "翻唱环境 Python 路径",
     "hint": "填写单独安装 RVC 依赖的 Python 可执行文件绝对路径，不使用 AstrBot 的 Python。仅由主人在管理页配置。",
     "default": ""
+  },
+  "singing_music_fallback": {
+    "type": "bool",
+    "description": "翻唱允许备用点歌音源",
+    "hint": "按歌名找音源失败时，尝试已启用的点歌插件 astrbot_plugin_music；默认平台须设为网易点歌。只取音频候选供 RVC 转换，不直接播放原曲。指定 B 站链接时不会偷偷换成其他版本。",
+    "default": false
   },
   "singing_rvc_root": {
     "type": "string",

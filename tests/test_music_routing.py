@@ -213,6 +213,7 @@ class MusicRoutingTests(unittest.IsolatedAsyncioTestCase):
                     if use_routing
                     else SimpleNamespace(route=lambda _: False)
                 )
+                plugin.cover_sources = SimpleNamespace(discard=lambda _: None)
                 handlers = [
                     handler("fixture.before", "before", before),
                     handler("fixture.bridge", "chat", plugin.chat),

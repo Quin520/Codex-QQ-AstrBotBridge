@@ -3,6 +3,7 @@
 import asyncio
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -111,7 +112,7 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.send(event, "hello")
         self.assertIn("已经尝试发送", await self.service.send(event, "different"))
         another = self.event("999")
-        self.assertIn("刚发送过", await self.service.send(another, "hello"))
+        self.assertIn("刚请求过", await self.service.send(another, "hello"))
         self.provider.get_audio.assert_awaited_once()
         another.send.assert_not_awaited()
 
@@ -217,3 +218,146 @@ class VoiceTests(unittest.IsolatedAsyncioTestCase):
         second_event.send.assert_not_awaited()
         release.set()
         self.assertIn("已发送", await first)
+
+    def enable_character_speech(self):
+        self.config["voice_use_rvc"] = True
+        self.converted = Path(self.temporary.name) / "converted.mp3"
+        self.converted_inputs = []
+
+        @asynccontextmanager
+        async def convert(source):
+            self.converted_inputs.append(source)
+            self.converted.write_bytes(b"ID3 isolated character audio")
+            try:
+                yield self.converted
+            finally:
+                self.converted.unlink()
+
+        self.service.converter = SimpleNamespace(
+            speech_error=lambda: "", converted_speech=convert
+        )
+
+    async def test_character_speech_sends_only_converted_audio_until_delivery_finishes(
+        self,
+    ):
+        self.enable_character_speech()
+        event = self.event()
+
+        async def deliver(result):
+            record = result.chain[0]
+            self.assertEqual(record.path, str(self.converted))
+            self.assertEqual(
+                Path(record.path).read_bytes(), b"ID3 isolated character audio"
+            )
+            self.assertNotEqual(Path(record.path).read_bytes(), self.audio.read_bytes())
+
+        event.send.side_effect = deliver
+        result = await self.service.send(event, "生日快乐")
+        self.assertIn("已发送", result)
+        self.assertEqual(self.converted_inputs, [self.audio])
+        self.assertEqual(event.get_extra("local_codex_voice_text"), "生日快乐")
+        self.assertFalse(self.converted.exists())
+        self.assertTrue(self.audio.exists())
+
+    async def test_disabled_character_speech_retains_provider_voice(self):
+        self.enable_character_speech()
+        self.config["voice_use_rvc"] = False
+        event = self.event()
+        await self.service.send(event, "hello")
+        self.assertEqual(self.converted_inputs, [])
+        self.assertEqual(event.send.call_args.args[0].chain[0].path, str(self.audio))
+
+    async def test_missing_unconfigured_or_busy_converter_never_calls_tts(self):
+        self.config["voice_use_rvc"] = True
+        event = self.event()
+        self.assertIn("尚未接通", await self.service.send(event, "hello"))
+        for message in ("角色音色模型未配置", "正在生成角色语音或翻唱"):
+            with self.subTest(message=message):
+                self.service.converter = SimpleNamespace(
+                    speech_error=lambda message=message: message
+                )
+                self.assertEqual(await self.service.send(event, "hello"), message)
+        self.provider.get_audio.assert_not_awaited()
+        event.send.assert_not_awaited()
+
+    async def test_conversion_failure_keeps_attempt_cooldown_without_original_fallback(
+        self,
+    ):
+        self.enable_character_speech()
+        for error in (RuntimeError("private model detail"), TimeoutError()):
+            with self.subTest(error=type(error).__name__):
+                self.service._last_sent.clear()
+
+                @asynccontextmanager
+                async def convert(source, error=error):
+                    raise error
+                    yield source
+
+                self.service.converter.converted_speech = convert
+                event = self.event()
+                with self.assertRaisesRegex(RuntimeError, "尚未发送") as caught:
+                    await self.service.send(event, "hello")
+                self.assertNotIn("private model detail", str(caught.exception))
+                self.assertTrue(event.get_extra("local_codex_voice_sent"))
+                self.assertIsNone(event.get_extra("local_codex_voice_text"))
+                event.send.assert_not_awaited()
+                self.assertIn("已经尝试", await self.service.send(event, "retry"))
+                self.assertIn(
+                    "稍后", await self.service.send(self.event("999"), "retry")
+                )
+
+    async def test_character_speech_tts_failure_also_reserves_attempt_cooldown(self):
+        self.enable_character_speech()
+        self.provider.get_audio.side_effect = RuntimeError("private provider detail")
+        event = self.event()
+        with self.assertRaisesRegex(RuntimeError, "尚未发送"):
+            await self.service.send(event, "hello")
+        self.assertTrue(event.get_extra("local_codex_voice_sent"))
+        self.assertIn("稍后", await self.service.send(self.event("999"), "retry"))
+        self.assertEqual(self.converted_inputs, [])
+        event.send.assert_not_awaited()
+
+    async def test_converted_audio_is_cleaned_after_delivery_failure_or_cancellation(
+        self,
+    ):
+        self.enable_character_speech()
+        for error in (RuntimeError("transport failure"), asyncio.CancelledError()):
+            with self.subTest(error=type(error).__name__):
+                self.service._last_sent.clear()
+                event = self.event()
+                event.send.side_effect = error
+                with self.assertRaises(type(error)):
+                    await self.service.send(event, "hello")
+                self.assertFalse(self.converted.exists())
+                self.assertFalse(self.service._lock.locked())
+                self.assertIsNone(event.get_extra("local_codex_voice_text"))
+                event.send.assert_awaited_once()
+
+    async def test_cancellation_during_conversion_sends_nothing_and_releases_resources(
+        self,
+    ):
+        self.enable_character_speech()
+        entered = asyncio.Event()
+        released = asyncio.Event()
+
+        @asynccontextmanager
+        async def convert(source):
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+                yield source
+            finally:
+                released.set()
+
+        self.service.converter.converted_speech = convert
+        event = self.event()
+        task = asyncio.create_task(self.service.send(event, "hello"))
+        await entered.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertTrue(released.is_set())
+        self.assertFalse(self.service._lock.locked())
+        self.assertIsNone(event.get_extra("local_codex_voice_text"))
+        self.assertIn("稍后", await self.service.send(self.event("999"), "retry"))
+        event.send.assert_not_awaited()

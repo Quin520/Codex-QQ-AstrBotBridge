@@ -75,11 +75,15 @@ class SingingWorkerTests(unittest.TestCase):
         job = worker._load_job(self.job_path)
         self.assertEqual(job["pitch"], 0)
         self.assertEqual(job["duration"], 60)
+        self.assertEqual(job["mode"], "cover")
         for key, value in (
             ("duration", 121),
             ("duration", 29),
             ("duration", True),
             ("pitch", 13),
+            ("mode", "raw"),
+            ("mode", None),
+            ("mode", {"speech": True}),
         ):
             with self.subTest(key=key, value=value):
                 changed = {**self.job, key: value}
@@ -88,16 +92,37 @@ class SingingWorkerTests(unittest.TestCase):
                     worker._load_job(self.job_path)
 
     def test_source_and_output_cannot_escape_job_directory(self):
-        for key, value in (
-            ("source", str(self.model)),
-            ("output", str(self.root / "cover.mp3")),
+        for mode in ("cover", "speech"):
+            for key, value in (
+                ("source", str(self.model)),
+                ("output", str(self.root / "cover.mp3")),
+            ):
+                with self.subTest(mode=mode, key=key):
+                    self.job_path.write_text(
+                        json.dumps({**self.job, "mode": mode, key: value}),
+                        encoding="utf-8",
+                    )
+                    with self.assertRaises(ValueError):
+                        worker._load_job(self.job_path)
+
+    def _speech_mode(self, duration=120):
+        self.job.update(mode="speech", duration=duration)
+        self.write_job()
+        for relative in (
+            "tools/pymss/cli.py",
+            "assets/pymss_weights/" + str(worker.SEPARATOR_RELATIVE),
+            "assets/pymss_weights/"
+            + str(worker.SEPARATOR_RELATIVE.with_suffix(".yaml")),
         ):
-            with self.subTest(key=key):
-                self.job_path.write_text(
-                    json.dumps({**self.job, key: value}), encoding="utf-8"
-                )
-                with self.assertRaises(ValueError):
-                    worker._load_job(self.job_path)
+            (self.root / relative).unlink()
+
+    def test_speech_preflight_needs_only_conversion_assets(self):
+        self._speech_mode()
+        job = worker._load_job(self.job_path)
+        worker._preflight(job)
+        (self.root / "assets/rmvpe/rmvpe.pt").unlink()
+        with self.assertRaises(FileNotFoundError):
+            worker._preflight(job)
 
     def test_missing_base_model_fails_before_any_process(self):
         (self.root / "assets/rmvpe/rmvpe.pt").unlink()
@@ -159,6 +184,8 @@ class SingingWorkerTests(unittest.TestCase):
         (self.root / "infer/cli.py").write_text(
             "import shutil, sys\n"
             "args = sys.argv\n"
+            "assert args[args.index('--speaker-id') + 1] == '0'\n"
+            "assert args[args.index('--f0-method') + 1] == 'rmvpe'\n"
             "assert args[args.index('--pitch') + 1] == '-2'\n"
             "assert args[args.index('--index-rate') + 1] == '0'\n"
             "shutil.copyfile(args[args.index('--input') + 1], args[args.index('--output') + 1])\n",
@@ -190,6 +217,106 @@ class SingingWorkerTests(unittest.TestCase):
         self.assertGreater(output.stat().st_size, 1000)
         self.assertEqual(output.name, "cover.mp3")
         self.assertFalse((self.job_dir / "cover.pending.mp3").exists())
+
+    def test_real_ffmpeg_speech_skips_separator_and_preserves_full_utterance(self):
+        self._real_media_tools()
+        self._speech_mode()
+        index = self.root / "added_voice.index"
+        index.write_bytes(b"fixture index")
+        self.job["index"] = str(index)
+        self.write_job()
+        (self.root / "infer/cli.py").write_text(
+            "import pathlib, shutil, sys\n"
+            "args = sys.argv\n"
+            "assert args[args.index('--speaker-id') + 1] == '0'\n"
+            "assert args[args.index('--f0-method') + 1] == 'rmvpe'\n"
+            "assert args[args.index('--pitch') + 1] == '-2'\n"
+            "assert args[args.index('--index-rate') + 1] == '0.75'\n"
+            "assert pathlib.Path(args[args.index('--index') + 1]).name == 'added_voice.index'\n"
+            "assert pathlib.Path(args[args.index('--input') + 1]).name == 'input.wav'\n"
+            "shutil.copyfile(args[args.index('--input') + 1], args[args.index('--output') + 1])\n",
+            encoding="utf-8",
+        )
+        job = worker._load_job(self.job_path)
+        with (self.job_dir / "test.log").open("wb") as log:
+            output = worker.run_job(self.job_path, log)
+            self.assertAlmostEqual(
+                worker._audio_duration(output, job, log), 31, delta=0.1
+            )
+        self.assertEqual(output.name, "cover.mp3")
+        self.assertGreater(output.stat().st_size, 1000)
+        self.assertFalse((self.job_dir / "stems").exists())
+        self.assertNotIn(
+            "tools.pymss", (self.job_dir / "test.log").read_text(encoding="utf-8")
+        )
+
+    def test_speech_over_duration_limit_fails_instead_of_truncating(self):
+        self._real_media_tools()
+        self._speech_mode(duration=30)
+        with (
+            (self.job_dir / "test.log").open("wb") as log,
+            self.assertRaisesRegex(ValueError, "refusing to truncate"),
+        ):
+            worker.run_job(self.job_path, log)
+        self.assertFalse((self.job_dir / "input.wav").exists())
+        self.assertFalse(Path(self.job["output"]).exists())
+
+    def test_speech_conversion_failure_never_returns_tts_original(self):
+        self._real_media_tools()
+        self._speech_mode()
+        (self.root / "infer/cli.py").write_text(
+            "raise SystemExit(7)\n", encoding="utf-8"
+        )
+        with (
+            (self.job_dir / "test.log").open("wb") as log,
+            self.assertRaises(subprocess.CalledProcessError),
+        ):
+            worker.run_job(self.job_path, log)
+        self.assertFalse(Path(self.job["output"]).exists())
+        self.assertFalse((self.job_dir / "cover.pending.mp3").exists())
+
+    def test_speech_success_without_converted_audio_is_failure(self):
+        self._real_media_tools()
+        self._speech_mode()
+        (self.root / "infer/cli.py").write_text(
+            "raise SystemExit(0)\n", encoding="utf-8"
+        )
+        with (
+            (self.job_dir / "test.log").open("wb") as log,
+            self.assertRaises(FileNotFoundError),
+        ):
+            worker.run_job(self.job_path, log)
+        self.assertFalse(Path(self.job["output"]).exists())
+
+    def test_speech_truncated_conversion_is_rejected(self):
+        self._real_media_tools()
+        self._speech_mode()
+        (self.root / "infer/cli.py").write_text(
+            "import sys, wave\n"
+            "args = sys.argv\n"
+            "with wave.open(args[args.index('--input') + 1], 'rb') as source:\n"
+            "    with wave.open(args[args.index('--output') + 1], 'wb') as output:\n"
+            "        output.setparams(source.getparams())\n"
+            "        output.writeframes(source.readframes(source.getframerate()))\n",
+            encoding="utf-8",
+        )
+        with (
+            (self.job_dir / "test.log").open("wb") as log,
+            self.assertRaisesRegex(ValueError, "Unexpected audio duration"),
+        ):
+            worker.run_job(self.job_path, log)
+        self.assertFalse(Path(self.job["output"]).exists())
+
+    def test_speech_output_size_limit_prevents_publication(self):
+        self._real_media_tools()
+        self._speech_mode()
+        with (
+            patch.object(worker, "MAX_OUTPUT_BYTES", 100),
+            (self.job_dir / "test.log").open("wb") as log,
+            self.assertRaisesRegex(ValueError, "output size limit"),
+        ):
+            worker.run_job(self.job_path, log)
+        self.assertFalse(Path(self.job["output"]).exists())
 
     def test_separator_success_without_stems_is_failure(self):
         self._real_media_tools()

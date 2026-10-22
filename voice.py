@@ -2,6 +2,7 @@
 
 import asyncio
 import time
+from contextlib import AsyncExitStack
 from pathlib import Path
 
 from astrbot.api.event import AstrMessageEvent
@@ -14,9 +15,10 @@ from .group_context import is_proactive_group
 class VoiceService:
     """Expose speech text, never a destination, executable or arbitrary file."""
 
-    def __init__(self, context, config: dict):
+    def __init__(self, context, config: dict, converter=None):
         self.context = context
         self.config = config
+        self.converter = converter
         self._lock = asyncio.Lock()
         self._last_sent = {}
 
@@ -48,7 +50,7 @@ class VoiceService:
         return str(event.unified_msg_origin)
 
     @staticmethod
-    def _audio_path(value: str) -> Path:
+    def _audio_path(value: str | Path) -> Path:
         # Only provider-created local audio is accepted, never a URL to forward.
         path = Path(value)
         if (
@@ -84,9 +86,18 @@ class VoiceService:
             key: when for key, when in self._last_sent.items() if now - when < 600
         }
         if now - self._last_sent.get(scope, float("-inf")) < cooldown:
-            return "当前会话刚发送过语音，请稍后再试，不要重复发送。"
+            return "当前会话刚请求过语音，请稍后再试，不要重复发送。"
 
-        async with self._lock:
+        async with self._lock, AsyncExitStack() as stack:
+            use_rvc = bool(self.config.get("voice_use_rvc", False))
+            if use_rvc:
+                if self.converter is None:
+                    return "角色音色朗读尚未接通，尚未发送语音；请主人检查插件配置。"
+                if message := self.converter.speech_error():
+                    return message
+                # Reserve work before synthesis; failed RVC attempts also cost resources.
+                self._last_sent[scope] = time.monotonic()
+                event.set_extra("local_codex_voice_sent", True)
             try:
                 async with asyncio.timeout(30):
                     provider_id = str(
@@ -109,6 +120,18 @@ class VoiceService:
                 raise RuntimeError("语音生成超时，尚未发送语音。") from exc
             except Exception as exc:
                 raise RuntimeError("语音生成失败，尚未发送语音。") from exc
+
+            if use_rvc:
+                try:
+                    path = self._audio_path(
+                        await stack.enter_async_context(
+                            self.converter.converted_speech(path)
+                        )
+                    )
+                except TimeoutError as exc:
+                    raise RuntimeError("角色音色转换超时，尚未发送语音。") from exc
+                except Exception as exc:
+                    raise RuntimeError("角色音色转换失败，尚未发送语音。") from exc
 
             # Reserve before sending: if delivery times out, avoid duplicate audio.
             self._last_sent[scope] = time.monotonic()

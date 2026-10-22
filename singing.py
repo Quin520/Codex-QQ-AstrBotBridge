@@ -7,6 +7,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from astrbot.api import logger
@@ -22,10 +24,11 @@ from .voice import VoiceService
 class SingingService:
     """Accept only a current music-search selection, never model-selected paths."""
 
-    def __init__(self, context, config: dict, data_dir: Path):
+    def __init__(self, context, config: dict, data_dir: Path, source_service=None):
         self.context = context
         self.config = config
         self.data_dir = data_dir / "singing"
+        self.source_service = source_service
         self._lock = asyncio.Lock()
         self._last_sent = {}
         self._process = None
@@ -92,16 +95,26 @@ class SingingService:
                 pass
         await process.wait()
 
-    async def _render(self, source: Path, directory: Path) -> Path:
+    async def _render(
+        self, source: Path, directory: Path, *, mode: str = "cover"
+    ) -> Path:
         """Run the bundled fixed pipeline with private configuration and logs."""
+        if mode not in {"cover", "speech"}:
+            raise ValueError("Unknown character audio mode.")
         output = directory / "cover.mp3"
+        pitch_key = "voice_rvc_pitch" if mode == "speech" else "singing_pitch"
         job = {
+            "mode": mode,
             "rvc_root": str(self.config["singing_rvc_root"]),
             "model": str(self.config["singing_model"]),
             "index": str(self.config.get("singing_index", "") or ""),
-            "pitch": max(-12, min(12, int(self.config.get("singing_pitch", 0)))),
-            "duration": max(
-                30, min(120, int(self.config.get("singing_duration_seconds", 60)))
+            "pitch": max(-12, min(12, int(self.config.get(pitch_key, 0)))),
+            "duration": (
+                120
+                if mode == "speech"
+                else max(
+                    30, min(120, int(self.config.get("singing_duration_seconds", 60)))
+                )
             ),
             "source": str(source),
             "output": str(output),
@@ -134,7 +147,7 @@ class SingingService:
                     code = await self._process.wait()
                 if code != 0:
                     raise RuntimeError(
-                        "Cover worker failed; see the private worker log."
+                        "Character audio worker failed; see the private worker log."
                     )
             finally:
                 await self._kill_worker()
@@ -147,8 +160,56 @@ class SingingService:
             or not output.is_file()
             or not 0 < output.stat().st_size <= 10 * 1024 * 1024
         ):
-            raise RuntimeError("Cover worker did not produce a bounded local MP3.")
+            raise RuntimeError(
+                "Character audio worker did not produce a bounded local MP3."
+            )
         return output
+
+    def speech_error(self) -> str:
+        """Check character speech availability before spending TTS resources.
+
+        Returns:
+            A safe operator-facing explanation, or an empty string when ready.
+        """
+        if self._closed:
+            return "角色音色服务已停止，尚未发送语音。"
+        if message := self._settings_error():
+            return f"角色音色朗读不可用：{message}"
+        if self._lock.locked():
+            return "正在生成角色语音或翻唱，请稍后再试，尚未发送语音。"
+        return ""
+
+    @asynccontextmanager
+    async def converted_speech(self, source: Path) -> AsyncIterator[Path]:
+        """Convert provider-created speech while owning the shared RVC worker.
+
+        Args:
+            source: Validated local audio produced by the configured TTS provider.
+
+        Yields:
+            The converted MP3, valid until the caller finishes delivery.
+
+        Raises:
+            RuntimeError: The environment is unavailable, busy or conversion fails.
+        """
+        if message := self.speech_error():
+            raise RuntimeError(message)
+        source = VoiceService._audio_path(source)
+        async with self._lock:
+            self._active_task = asyncio.current_task()
+            try:
+                self.data_dir.mkdir(parents=True, exist_ok=True)
+                with tempfile.TemporaryDirectory(
+                    prefix="speech-", dir=self.data_dir
+                ) as temporary:
+                    directory = Path(temporary)
+                    copied = directory / "source.audio"
+                    shutil.copyfile(source, copied)
+                    async with asyncio.timeout(180):
+                        output = await self._render(copied, directory, mode="speech")
+                    yield output
+            finally:
+                self._active_task = None
 
     async def send(self, event: AstrMessageEvent, search_id: str, position: int) -> str:
         """Convert one selected song and deliver it to the current trusted chat."""
@@ -189,9 +250,14 @@ class SingingService:
                     directory = Path(temporary)
                     async with asyncio.timeout(260):
                         async with asyncio.timeout(45):
-                            async with prepared_song(
-                                self.context, event, search_id, position
-                            ) as (source, title):
+                            prepared = (
+                                self.source_service.prepared(event, search_id, position)
+                                if self.source_service is not None
+                                else prepared_song(
+                                    self.context, event, search_id, position
+                                )
+                            )
+                            async with prepared as (source, title):
                                 copied = directory / "source.audio"
                                 shutil.copyfile(source, copied)
                         output = await self._render(copied, directory)

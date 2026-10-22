@@ -15,6 +15,7 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.star import StarMetadata
 
 from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
+from .cover_sources import CoverSources
 from .group_context import GroupContext, is_proactive_group
 from .image_generator import ImageGenerator
 from .integration import configure_provider
@@ -35,7 +36,6 @@ class LocalCodex(Star):
         super().__init__(context)
         self.config = config
         self.tool_policy = QQToolPolicy(context, config)
-        self.voice = VoiceService(context, config)
         self.music_routing = MusicRouting()
         self.profiles = {}
         for profile in config.get("user_profiles", []):
@@ -54,7 +54,11 @@ class LocalCodex(Star):
         )
         self.video_context = VideoContext(self.config, self.data_dir)
         self.image_generator = ImageGenerator(self.config, self.data_dir)
-        self.singing = SingingService(context, config, self.data_dir)
+        self.cover_sources = CoverSources(context, config, self.data_dir)
+        self.singing = SingingService(
+            context, config, self.data_dir, source_service=self.cover_sources
+        )
+        self.voice = VoiceService(context, config, converter=self.singing)
         self.session_file = self.data_dir / "sessions.json"
         self.sessions = (
             json.loads(self.session_file.read_text(encoding="utf-8"))
@@ -201,6 +205,11 @@ class LocalCodex(Star):
                 "send_voice 只会朗读，不会唱歌；不要把朗读歌词或播放现成歌曲说成自己唱歌。"
                 "成功发送语音后不再重复文字或等待提示；失败时如实说明。\n"
             )
+            if self.config.get("voice_use_rvc", False):
+                req.system_prompt += (
+                    "\n当前朗读已启用固定角色音色：send_voice 会先生成朗读，再用主人配置的 RVC 模型转音色。"
+                    "用户要求用自己的声音说话仍调用 send_voice；转换失败不能改发默认原声冒充角色音色。"
+                )
         if self.config.get("image_generation_enabled", False):
             req.system_prompt += (
                 "\n生图能力：用户明确要求画图或生成图片时使用 generate_image，"
@@ -210,9 +219,10 @@ class LocalCodex(Star):
             )
         if self.config.get("singing_enabled", False):
             req.system_prompt += (
-                "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_music，"
+                "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_cover_music，"
                 "再将本次候选的 search_id、position 交给 sing_cover。普通点歌仍用 deliver_music。"
-                "用户给了 B 站链接或 BV/AV 时，find_music 的 title 直接填写该链接或编号，"
+                "find_cover_music 会在允许时尝试备用点歌音源；不要用播放原曲的工具代替翻唱。"
+                "用户给了 B 站链接或 BV/AV 时，find_cover_music 的 title 直接填写该链接或编号，"
                 "不要把确切链接改成模糊歌名再搜索。接口受限不代表音源不存在，应如实说明。"
                 "遇到 HTTP 412 或接口受限，不在同轮反复换词重搜，应说明尚未开始翻唱。"
                 "sing_cover 使用主人配置的固定 RVC 音色，默认只制作前 60 秒片段。"
@@ -302,6 +312,13 @@ class LocalCodex(Star):
         """
         self.group_context.observe(event)
         accepted = self._accepts_event(event)
+        if event.get_sender_id() != event.get_self_id() and is_allowed(
+            self.config,
+            event.get_platform_name(),
+            event.get_sender_id(),
+            event.get_group_id(),
+        ):
+            self.cover_sources.discard(event)
         if accepted and self.config.get("video_summary_enabled", False):
             await self._prepare_video(event)
         if self.config.get("integrate_plugins", False):
@@ -498,19 +515,32 @@ class LocalCodex(Star):
     async def sing_cover(self, event: AstrMessageEvent, search_id: str, position: int):
         """Sing a requested song excerpt using the configured character voice.
 
-        First call find_music and select one of its current candidates. This is
+        First call find_cover_music and select one of its current candidates. This is
         voice conversion, not ordinary playback or text-to-speech. Never use it
         during proactive messages. Successful delivery finishes the turn.
 
         Args:
-            search_id(string): Exact current search_id returned by find_music.
-            position(int): Exact candidate position returned by find_music.
+            search_id(string): Exact current search_id returned by find_cover_music.
+            position(int): Exact candidate position returned by find_cover_music.
         """
         result = await self.singing.send(event, search_id, position)
         if description := event.get_extra("local_codex_cover_text"):
             self.group_context.observe_voice_reply(event, description)
             return None
         return result
+
+    @filter.llm_tool(name="find_cover_music")
+    async def find_cover_music(self, event: AstrMessageEvent, title: str):
+        """Find session-bound audio candidates for a requested character cover.
+
+        Searches the original music provider, then an enabled alternate provider
+        on failure. Does not play or send the original recording. An exact video
+        reference cannot silently become a different song from another source.
+
+        Args:
+            title(string): Song name with optional artist, or the exact Bilibili link/ID.
+        """
+        return await self.cover_sources.find(event, title)
 
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""
