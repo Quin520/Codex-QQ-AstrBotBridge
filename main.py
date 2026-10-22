@@ -16,6 +16,8 @@ from astrbot.core.star.star import StarMetadata
 
 from .access import PermissionCheckedTool, QQToolPolicy
 from .integration import configure_provider
+from .profile_learning import ProfileLearner
+from .profile_reviews import ProfileReviewStore
 from .profiles import profile_instructions
 from .provider import PROVIDER_ID
 from .runner import CodexRunner
@@ -71,6 +73,11 @@ class LocalCodex(Star):
             else {}
         )
         self.lock = asyncio.Lock()
+        self.review_loop = None
+        self.profile_reviews = ProfileReviewStore(
+            config, self.data_dir, self._refresh_profiles
+        )
+        self.profile_learner = ProfileLearner(self, self.profile_reviews)
         self.runner = CodexRunner(
             Path(str(config.get("codex_exe", ""))).expanduser(),
             self.data_dir,
@@ -83,7 +90,46 @@ class LocalCodex(Star):
 
     async def initialize(self) -> None:
         """Register the optional provider without modifying other plugins."""
+        self.review_loop = asyncio.get_running_loop()
         await configure_provider(self.context, self.config, self.data_dir)
+
+    def _refresh_profiles(self) -> None:
+        """Apply approved preferences immediately to subsequent conversations."""
+        self.profiles = {
+            str(profile["qq"]).strip(): profile
+            for profile in self.config.get("user_profiles", [])
+            if str(profile.get("qq", "")).strip()
+        }
+
+    def observe_profile_message(self, event: AstrMessageEvent, adapter) -> None:
+        """Accept collected events from the active self-learning plugin."""
+        if is_allowed(
+            self.config,
+            event.get_platform_name(),
+            event.get_sender_id(),
+            event.get_group_id(),
+        ):
+            self.profile_learner.observe(event, adapter)
+
+    async def profile_review_api(self, operation: str, **kwargs):
+        """Marshal authenticated WebUI requests onto the AstrBot event loop."""
+
+        async def execute():
+            if self.profile_learner.closed:
+                raise RuntimeError("The Codex bridge has been unloaded.")
+            if operation == "list":
+                return self.profile_reviews.list(**kwargs)
+            if operation == "review":
+                return self.profile_reviews.review(**kwargs)
+            raise ValueError("Unknown profile review operation.")
+
+        if self.review_loop is None or self.review_loop.is_closed():
+            raise RuntimeError("The Codex bridge has not finished initialization.")
+        if asyncio.get_running_loop() is self.review_loop:
+            return await execute()
+        return await asyncio.wrap_future(
+            asyncio.run_coroutine_threadsafe(execute(), self.review_loop)
+        )
 
     @filter.on_astrbot_loaded()
     async def select_provider(self) -> None:
@@ -143,6 +189,11 @@ class LocalCodex(Star):
             event.stop_event()
             return
         instructions = "" if proactive_group else self._profile_instructions(event)
+        anchor = str(self.config.get("persona_anchor", "")).strip()
+        if anchor:
+            req.system_prompt = (
+                (req.system_prompt or "") + "\n角色表达约定：\n" + anchor
+            )
         if instructions:
             req.system_prompt = (req.system_prompt or "") + "\n" + instructions
         # Public tools need an explicit reviewed allowlist. Never infer computer
@@ -291,6 +342,9 @@ class LocalCodex(Star):
                 key = f"{event.unified_msg_origin}|{event.get_sender_id()}"
                 try:
                     instructions = self._profile_instructions(event)
+                    anchor = str(self.config.get("persona_anchor", "")).strip()
+                    if anchor:
+                        instructions = anchor + "\n" + instructions
                     if instructions:
                         prompt = instructions + "\n用户消息：\n" + prompt
                     thread_id, answer = await self.runner.run(
@@ -351,6 +405,7 @@ class LocalCodex(Star):
 
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""
+        await self.profile_learner.close()
         await self.runner.stop()
         if self.config.get("integrate_plugins", False):
             await self.context.provider_manager.terminate_provider(PROVIDER_ID)

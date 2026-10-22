@@ -1,0 +1,456 @@
+diff --git a/main.py b/main.py
+--- a/main.py
++++ b/main.py
+@@ -438,6 +438,12 @@
+             if self.plugin_config:
+                 self.plugin_config.total_messages_collected = self.learning_stats.total_messages_collected
+             self._log_message_capture_diag("saved:raw_message", event, message_text, level="info")
++            # Propose per-member changes only after the normal collection filters.
++            bridge = self.context.get_registered_star("astrbot_plugin_local_codex")
++            if bridge and bridge.activated and bridge.star_cls:
++                observer = getattr(bridge.star_cls, "observe_profile_message", None)
++                if observer:
++                    observer(event, self.llm_adapter)
+         else:
+             self._log_message_capture_diag("fail:raw_message_not_saved", event, message_text, level="info")
+ 
+diff --git a/webui/services/persona_review_service.py b/webui/services/persona_review_service.py
+--- a/webui/services/persona_review_service.py
++++ b/webui/services/persona_review_service.py
+@@ -72,6 +72,23 @@
+     def _resolve_umo(self, group_id: str) -> str:
+         """将group_id解析为unified_msg_origin以支持多配置文件"""
+         return self.group_id_to_unified_origin.get(group_id, group_id)
++
++    def _profile_bridge(self):
++        """Resolve the active bridge without caching an unloaded plugin instance."""
++        plugin = _optional_container_attr(self.container, 'plugin_instance')
++        if not plugin:
++            return None
++        metadata = plugin.context.get_registered_star("astrbot_plugin_local_codex")
++        if metadata and metadata.activated and metadata.star_cls:
++            return getattr(metadata.star_cls, 'profile_review_api', None)
++        return None
++
++    async def _review_profile(self, update_id, action, modified_content=None, comment=""):
++        bridge = self._profile_bridge()
++        if not bridge:
++            return False, "本机 Codex 桥接未启用或版本不支持个人设置审批。"
++        return await bridge("review", row_id=update_id, action=action,
++                            modified_content=modified_content, comment=comment)
+ 
+     def _auto_apply_enabled(self) -> bool:
+         if not self.plugin_config:
+@@ -726,6 +743,10 @@
+             except Exception as e:
+                 logger.error(f"获取风格学习审查失败: {e}", exc_info=True)
+ 
++        bridge = self._profile_bridge()
++        if bridge:
++            all_updates.extend(await bridge("list"))
++
+         # 按时间倒序排列
+         all_updates.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+ 
+@@ -793,6 +814,9 @@
+             status = "rejected"
+         else:
+             return False, "Invalid action, must be 'approve' or 'reject'"
++
++        if update_id.startswith("qq_profile_"):
++            return await self._review_profile(update_id, action, modified_content, comment)
+ 
+         # 判断审查类型
+         if update_id.startswith("style_"):
+@@ -1295,6 +1319,12 @@
+             except Exception as e:
+                 logger.warning(f"获取已审查风格学习更新失败: {e}")
+ 
++        bridge = self._profile_bridge()
++        if bridge:
++            profile_updates = await bridge("list", reviewed=True)
++            reviewed_updates.extend(row for row in profile_updates
++                                    if not status_filter or row['status'] == status_filter)
++
+         # 过滤掉无效记录（id 为 None 或空的条目）
+         reviewed_updates = [
+             u for u in reviewed_updates
+@@ -1321,6 +1351,9 @@
+         Returns:
+             Tuple[bool, str]: (是否成功, 消息)
+         """
++        if update_id.startswith("qq_profile_"):
++            return await self._review_profile(update_id, "revert", comment=reason)
++
+         # 判断撤回类型
+         if update_id.startswith("style_"):
+             # 风格学习审查撤回
+@@ -1374,6 +1407,9 @@
+         Returns:
+             Tuple[bool, str]: (是否成功, 消息)
+         """
++        if str(update_id).startswith("qq_profile_"):
++            return await self._review_profile(update_id, "delete")
++
+         if not self.database_manager:
+             return False, "Database manager not available"
+ 
+diff --git a/webui/blueprints/persona_reviews.py b/webui/blueprints/persona_reviews.py
+--- a/webui/blueprints/persona_reviews.py
++++ b/webui/blueprints/persona_reviews.py
+@@ -7,13 +7,36 @@
+ from ..dependencies import get_container
+ from ..services.persona_review_service import PersonaReviewService
+ from ..middleware.auth import require_auth
++from ..services.auth_service import is_webui_password_enabled
+ from ..utils.response import success_response, error_response
++from functools import wraps
++from ipaddress import ip_address
+ 
+ persona_reviews_bp = Blueprint('persona_reviews', __name__, url_prefix='/api')
+ 
+ 
++def require_review_access(handler):
++    """Keep member evidence and approval local when WebUI has no password."""
++    @wraps(handler)
++    @require_auth
++    async def guarded(*args, **kwargs):
++        if not is_webui_password_enabled(get_container().plugin_config):
++            try:
++                address = ip_address(request.remote_addr or "")
++                local = address.is_loopback or bool(
++                    getattr(address, 'ipv4_mapped', None)
++                    and address.ipv4_mapped.is_loopback
++                )
++            except ValueError:
++                local = False
++            if not local:
++                return jsonify({"error": "免密模式下，审批页面仅允许本机访问；远程使用请先启用管理页密码。"}), 403
++        return await handler(*args, **kwargs)
++    return guarded
++
++
+ @persona_reviews_bp.route("/persona_updates", methods=["GET"])
+-@require_auth
++@require_review_access
+ async def get_pending_persona_updates():
+     """获取所有待审查的人格更新 (整合三种数据源，支持分页)"""
+     try:
+@@ -37,7 +60,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/<update_id>/review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def review_persona_update(update_id: str):
+     """审查人格更新内容 (批准/拒绝)"""
+     try:
+@@ -67,7 +90,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/reviewed", methods=["GET"])
+-@require_auth
++@require_review_access
+ async def get_reviewed_persona_updates():
+     """获取已审查的人格更新列表"""
+     try:
+@@ -87,7 +110,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/<update_id>/revert", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def revert_persona_update(update_id: str):
+     """撤回人格更新审查"""
+     try:
+@@ -111,7 +134,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/<update_id>/delete", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def delete_persona_update(update_id: str):
+     """删除人格更新审查记录"""
+     try:
+@@ -130,7 +153,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/batch_delete", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def batch_delete_persona_updates():
+     """批量删除人格更新审查记录"""
+     try:
+@@ -157,7 +180,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/batch_review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def batch_review_persona_updates():
+     """批量审查人格更新记录"""
+     try:
+diff --git a/README.md b/README.md
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,12 @@
+ [功能](#核心功能) · [架构](#架构总览) · [安装](#快速开始) · [WebUI](#webui-dashboard) · [文档](#开发和文档) · [社区](#社区交流)
+ 
+ </div>
++
++<!-- Codex QQ profile review compatibility notice -->
++本地兼容修改：增加本机 Codex 桥接 v0.3.6 的个人相处设置审批。
++自学习采集消息后可生成针对当前成员的建议，在“审查队列 → 人格与个人设置”
++查看依据、编辑、批准或拒绝。未经批准不会写入桥接配置，也不修改全局人格。
++源码和回退说明：https://github.com/Quin520/Codex-QQ-AstrBotBridge/tree/main/compat/self_learning
+ 
+ > **版权与许可 / Copyright and License**
+ >
+diff --git a/web_src/src/components/business/ReviewCard.tsx b/web_src/src/components/business/ReviewCard.tsx
+--- a/web_src/src/components/business/ReviewCard.tsx
++++ b/web_src/src/components/business/ReviewCard.tsx
+@@ -1,4 +1,4 @@
+-import { createSignal, For, Show } from 'solid-js';
++import { createEffect, createSignal, For, Show } from 'solid-js';
+ import { api } from '../../services/api';
+ import { useDashboard } from '../../stores/dashboard';
+ import type { ReviewItem } from '../../types/dashboard';
+@@ -16,20 +16,29 @@
+   const dashboard = useDashboard();
+   const [busy, setBusy] = createSignal(false);
+   const id = () => String(props.item.id ?? '');
+-  const execute = async (action: 'approve' | 'reject' | 'delete') => {
++  const isProfile = () => props.item.review_source === 'qq_profile';
++  const pendingProfile = () => isProfile() && props.item.status === 'pending';
++  const [edited, setEdited] = createSignal('');
++  createEffect(() => setEdited(String(props.item.after ?? '')));
++  const fieldOptions = () => Array.isArray(props.item.field_options) ? props.item.field_options as string[] : [];
++  const evidence = () => Array.isArray(props.item.evidence) ? props.item.evidence as { text: string; timestamp: number }[] : [];
++  const execute = async (action: 'approve' | 'reject' | 'delete' | 'revert') => {
+     if (!id()) return;
+     const destructive = action !== 'approve';
+     if (!await dashboard.confirm({
+       title: action === 'delete' ? '删除审查记录' : '审查确认',
+-      message: `确定${action === 'approve' ? '通过' : action === 'reject' ? '驳回' : '删除'}“${titleFor(props.item)}”吗？`,
+-      confirmText: action === 'approve' ? '批准' : action === 'reject' ? '驳回' : '删除',
++      message: `确定${action === 'approve' ? '通过' : action === 'reject' ? '驳回' : action === 'revert' ? '撤回' : '删除'}“${titleFor(props.item)}”吗？`,
++      confirmText: action === 'approve' ? '批准' : action === 'reject' ? '驳回' : action === 'revert' ? '撤回' : '删除',
+       tone: destructive ? 'danger' : 'success',
+     })) return;
+     setBusy(true);
+     try {
+       if (props.kind === 'persona') {
+-        if (action === 'delete') await api.post(`/api/persona_updates/${encodeURIComponent(id())}/delete`, {});
+-        else await api.post(`/api/persona_updates/${encodeURIComponent(id())}/review`, { action });
++        if (action === 'revert') await api.post(`/api/persona_updates/${encodeURIComponent(id())}/revert`, {});
++        else if (action === 'delete') await api.post(`/api/persona_updates/${encodeURIComponent(id())}/delete`, {});
++        else await api.post(`/api/persona_updates/${encodeURIComponent(id())}/review`, {
++          action, ...(isProfile() && action === 'approve' ? { modified_content: edited() } : {}),
++        });
+       } else if (props.kind === 'style') {
+         const reviewId = id().replace(/^style_/, '');
+         if (action === 'delete') await api.delete(`/api/style_learning/reviews/${encodeURIComponent(reviewId)}`);
+@@ -58,6 +67,24 @@
+       <Show when={props.item.definition || props.item.meaning || props.item.review_detail}>
+         <p>{textOrDash(props.item.definition ?? props.item.meaning ?? props.item.review_detail)}</p>
+       </Show>
++      <Show when={isProfile()}>
++        <p>仅修改此成员的“{textOrDash(props.item.field_label)}”。批准后保存，拒绝则保持原设置。</p>
++        <Show when={pendingProfile()}>
++        <label>审批后的值（可修改）
++          <Show when={fieldOptions().length > 0 && props.item.field_type !== 'list'} fallback={
++            <textarea aria-label="审批后的值" rows={4} value={edited()} onInput={(event) => setEdited(event.currentTarget.value)} />
++          }>
++            <select aria-label="审批后的值" value={edited()} onChange={(event) => setEdited(event.currentTarget.value)}>
++              <For each={fieldOptions()}>{option => <option value={option}>{option}</option>}</For>
++            </select>
++          </Show>
++        </label>
++        <Show when={props.item.field_type === 'list'}><small>每行一项。{fieldOptions().length ? `可选：${fieldOptions().join('、')}` : ''}</small></Show>
++        </Show>
++        <details open><summary>聊天依据</summary>
++          <For each={evidence()}>{item => <blockquote><small>{formatTime(item.timestamp)}</small><p>{item.text}</p></blockquote>}</For>
++        </details>
++      </Show>
+       <Show when={before() || after()}>
+         <details class={styles['review-diff']}>
+           <summary>查看变更详情</summary>
+@@ -72,8 +99,13 @@
+         <details><summary>结构化信息</summary><pre>{summarize(props.item.pattern_details ?? props.item.few_shot_pairs)}</pre></details>
+       </Show>
+       <div class={styles['review-actions']}>
++        <Show when={!isProfile() || pendingProfile()}>
+         <Button size="sm" tone="success" icon="check" loading={busy()} onClick={() => execute('approve')}>通过</Button>
+         <Button size="sm" tone="warning" icon="close" loading={busy()} onClick={() => execute('reject')}>驳回</Button>
++        </Show>
++        <Show when={isProfile() && ['approved', 'rejected'].includes(String(props.item.status))}>
++          <Button size="sm" tone="warning" loading={busy()} onClick={() => execute('revert')}>撤回</Button>
++        </Show>
+         <Button size="sm" tone="danger" icon="delete" loading={busy()} onClick={() => execute('delete')}>删除</Button>
+       </div>
+     </Card>
+diff --git a/web_src/src/components/business/ReviewCard.module.scss b/web_src/src/components/business/ReviewCard.module.scss
+--- a/web_src/src/components/business/ReviewCard.module.scss
++++ b/web_src/src/components/business/ReviewCard.module.scss
+@@ -3,6 +3,30 @@
+ .review-card {
+   display: grid;
+   gap: 12px;
++
++  label {
++    display: grid;
++    gap: 6px;
++  }
++
++  textarea, select {
++    width: 100%;
++    box-sizing: border-box;
++    padding: 8px;
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    color: inherit;
++    background: transparent;
++    font: inherit;
++  }
++
++  blockquote {
++    margin: 8px 0;
++    padding-left: 10px;
++    border-left: 2px solid var(--border);
++    overflow-wrap: anywhere;
++    white-space: pre-wrap;
++  }
+ 
+   p {
+     margin: 0;
+diff --git a/web_src/src/pages/reviews/ReviewsPage.tsx b/web_src/src/pages/reviews/ReviewsPage.tsx
+--- a/web_src/src/pages/reviews/ReviewsPage.tsx
++++ b/web_src/src/pages/reviews/ReviewsPage.tsx
+@@ -10,7 +10,7 @@
+ import styles from './ReviewsPage.module.scss';
+ 
+ const config: Record<ReviewKind, { title: string; endpoint: string }> = {
+-  persona: { title: '待审人格', endpoint: '/api/persona_updates' },
++  persona: { title: '人格与个人设置', endpoint: '/api/persona_updates' },
+   style: { title: '风格审查', endpoint: '/api/style_learning/reviews' },
+   jargon: { title: '黑话审查', endpoint: '/api/jargon' },
+ };
+@@ -77,7 +77,7 @@
+   };
+   return (
+     <div class="page">
+-      <PageHeader title="审查队列" description="集中处理人格更新、表达风格和群聊黑话。" icon="fact_check" />
++      <PageHeader title="审查队列" description="集中处理人格更新、个人相处设置、表达风格和群聊黑话。个人设置建议只有批准后才写入对应成员。" icon="fact_check" />
+       <div class={styles['review-columns']}>
+         <For each={Object.keys(config) as ReviewKind[]}>{(kind) =>
+           <Panel title={config[kind].title} actions={
+@@ -93,6 +93,13 @@
+           </Panel>
+         }</For>
+       </div>
++      <Panel title="个人设置审查历史" hint="撤回会恢复该次审批前的值；有后续变更时不会覆盖。删除只移除记录。">
++        <div class="review-list">
++          <For each={reviews(dashboard.data, 'persona_reviewed').filter(item => item.review_source === 'qq_profile')} fallback={<EmptyState title="暂无个人设置审查历史" />}>
++            {item => <ReviewCard item={item} kind="persona" />}
++          </For>
++        </div>
++      </Panel>
+       <Panel title="最近学习批次" hint="支持重新学习和删除历史批次" actions={<Button icon="refresh" loading={batchLoading()} onClick={loadBatches}>刷新批次</Button>}>
+         <div class={styles['batch-grid']}>
+           <For each={batches()} fallback={<EmptyState title="暂无批次记录" />}>{(item) =>
+diff --git a/web_src/src/components/business/ReviewCard.test.tsx b/web_src/src/components/business/ReviewCard.test.tsx
+new file mode 100644
+--- /dev/null
++++ b/web_src/src/components/business/ReviewCard.test.tsx
+@@ -0,0 +1,54 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { ReviewCard } from './ReviewCard';
++
++const mocks = vi.hoisted(() => ({
++  post: vi.fn().mockResolvedValue({ success: true }),
++  confirm: vi.fn().mockResolvedValue(true),
++  refresh: vi.fn().mockResolvedValue(undefined),
++  toast: vi.fn(),
++}));
++vi.mock('../../services/api', () => ({ api: { post: mocks.post } }));
++vi.mock('../../stores/dashboard', () => ({ useDashboard: () => mocks }));
++
++afterEach(() => { cleanup(); vi.clearAllMocks(); });
++
++const item = {
++  id: 'qq_profile_test', review_source: 'qq_profile', title: 'Beta · 日常语气',
++  status: 'pending', before: '沿用人格', after: '温柔耐心', field_type: 'string',
++  field_options: ['沿用人格', '温柔耐心', '简洁直接'], field_label: '日常语气',
++  evidence: [{ text: '以后直说就好。<script>bad()</script>', timestamp: 1 }],
++};
++
++describe('personal profile review', () => {
++  it('shows a revert action for history without allowing another approval', async () => {
++    render(() => <ReviewCard item={{ ...item, status: 'approved' }} kind="persona" />);
++    expect(screen.queryByLabelText('审批后的值')).toBeNull();
++    expect(screen.queryByRole('button', { name: /通过/ })).toBeNull();
++    await fireEvent.click(screen.getByRole('button', { name: '撤回' }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/qq_profile_test/revert', {}));
++  });
++
++  it('shows literal evidence and submits the administrator edited option', async () => {
++    const { container } = render(() => <ReviewCard item={item} kind="persona" />);
++    expect(screen.getByText('以后直说就好。<script>bad()</script>')).toBeInTheDocument();
++    expect(container.querySelector('script')).toBeNull();
++    await fireEvent.change(screen.getByLabelText('审批后的值'), { target: { value: '简洁直接' } });
++    await fireEvent.click(screen.getByRole('button', { name: /通过/ }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/qq_profile_test/review', { action: 'approve', modified_content: '简洁直接' }));
++  });
++
++  it('does not send edited values when rejecting a suggestion', async () => {
++    render(() => <ReviewCard item={{ ...item, field_type: 'list', field_options: [], after: 'music' }} kind="persona" />);
++    await fireEvent.input(screen.getByLabelText('审批后的值'), { target: { value: 'new\nvalue' } });
++    await fireEvent.click(screen.getByRole('button', { name: /驳回/ }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/qq_profile_test/review', { action: 'reject' }));
++  });
++
++  it('keeps existing persona reviews on their original payload', async () => {
++    render(() => <ReviewCard item={{ id: '12', title: 'Persona', after: 'text' }} kind="persona" />);
++    expect(screen.queryByLabelText('审批后的值')).toBeNull();
++    await fireEvent.click(screen.getByRole('button', { name: /通过/ }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/12/review', { action: 'approve' }));
++  });
++});
+diff --git a/tests/integration/test_profile_review_access.py b/tests/integration/test_profile_review_access.py
+new file mode 100644
+--- /dev/null
++++ b/tests/integration/test_profile_review_access.py
+@@ -0,0 +1,32 @@
++"""Passwordless profile reviews must stay local; password mode still authenticates."""
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from webui.compat import Quart
++from webui.blueprints import persona_reviews
++from webui.middleware import auth
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("address,enabled,status", [
++    ("127.0.0.1", False, 200),
++    ("::1", False, 200),
++    ("198.51.100.10", False, 403),
++    ("127.0.0.1", True, 401),
++    ("198.51.100.10", True, 401),
++])
++async def test_profile_review_access(monkeypatch, address, enabled, status):
++    container = SimpleNamespace(plugin_config=SimpleNamespace(enable_webui_password=enabled))
++    monkeypatch.setattr(persona_reviews, "get_container", lambda: container)
++    monkeypatch.setattr(auth, "get_container", lambda: container)
++    service = SimpleNamespace(get_pending_persona_updates=AsyncMock(return_value={"success": True, "updates": []}))
++    monkeypatch.setattr(persona_reviews, "PersonaReviewService", lambda _: service)
++    app = Quart("profile-review-access-test")
++    app.register_blueprint(persona_reviews.persona_reviews_bp)
++    client = app.test_client(client=(address, 50000))
++    response = await client.get("/api/persona_updates")
++    assert response.status_code == status
++    if status != 200:
++        service.get_pending_persona_updates.assert_not_awaited()

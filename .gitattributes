@@ -1,0 +1,2 @@
+# Unified patches require a space marker on otherwise empty context lines.
+compat/self_learning/*.patch whitespace=-blank-at-eol

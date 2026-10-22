@@ -1,0 +1,38 @@
+{
+  "main.py": {
+    "before": "e0965daab591a5ccaf78cfe21f1535de1887b1586bffa29dd925d107e91de3c8",
+    "after": "2c987ac606fd2f11c03578def06b5c24af4e43fb65040eca5d163c07bdf0670e"
+  },
+  "webui/services/persona_review_service.py": {
+    "before": "628e183f77ad7f4c9be433da32c40aef947ee268210b528d1c991ae6a684429d",
+    "after": "12a0820af1c7f21ffd33a94e8035be835db610d7592fc854836a811a44937bb3"
+  },
+  "webui/blueprints/persona_reviews.py": {
+    "before": "86046a9a36ef61bfdce60ff0c4d0690fc02d7f34f8762cb36e2ffd29217d515c",
+    "after": "bdc9577bdf70703a6c49ddf3e963536c66dd8615753fa055f5ed480af3be074d"
+  },
+  "README.md": {
+    "before": "80c4466db62780d4c7cc3fe043766d35e6625f2c0f4c7f72e0a8501fc1e40880",
+    "after": "b1c44e8786a1ddc0ec6ce75324b05065daf7e8d6435e89530c2669044ebebd9d"
+  },
+  "web_src/src/components/business/ReviewCard.tsx": {
+    "before": "e243e787dcb8b67beeffe3db88fbfc7873a6811d0a0ed7280ccbe9a9da38606d",
+    "after": "476eca66168b8b8ff5a2b774564ddd4f9d69f940b5d30cc3664f07ec8dc8c69f"
+  },
+  "web_src/src/components/business/ReviewCard.module.scss": {
+    "before": "d8698ab4cf01f1fcec09e4c6145ed84291b3d93d23ac7af52321df86edf91831",
+    "after": "2f4b4cfc763c988ce3ba88d3bc2abbe11c9978bd3efa8c703f61cb31912a01d7"
+  },
+  "web_src/src/pages/reviews/ReviewsPage.tsx": {
+    "before": "bda6c58feea97c31ea4c4bae4a093e44b054a0aa44051b948bdf9d54105c6f60",
+    "after": "c42a8d9558dbdfd949604b6877d6c9fcd2e104d0f15d585bc00308ffa8f7ec0c"
+  },
+  "web_src/src/components/business/ReviewCard.test.tsx": {
+    "before": null,
+    "after": "cf569b1632f68a4ade1b481c672470c96ec4077444f1a57495df0164c28cbff7"
+  },
+  "tests/integration/test_profile_review_access.py": {
+    "before": null,
+    "after": "52c16c691a49e56a322ce435f40fa77c30c4735e80e3594dab737d491500a358"
+  }
+}

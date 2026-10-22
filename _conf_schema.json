@@ -87,6 +87,24 @@
       }
     }
   },
+  "persona_anchor": {
+    "type": "text",
+    "description": "固定角色表达约定",
+    "hint": "每次聊天和主动发言都补充这些约定；个人学习不能修改。适合写口吻、性格和表达示例。角色扮演不能保证模型否认真实 AI 身份，也不改变权限。",
+    "default": ""
+  },
+  "profile_learning_enabled": {
+    "type": "bool",
+    "description": "从自学习插件生成个人设置审批建议",
+    "hint": "需要安装 README 中的自学习插件兼容补丁。只分析已配置成员在允许会话中的消息，后台生成建议；在自学习管理页批准后才修改，不能自动批准。",
+    "default": false
+  },
+  "profile_learning_interval": {
+    "type": "int",
+    "description": "同一成员的学习分析间隔（秒）",
+    "hint": "默认 300，最短 60。消息先合并 20 秒，每次最多分析最近 12 条；后台分析也会使用模型额度。",
+    "default": 300
+  },
   "user_profiles": {
     "type": "template_list",
     "description": "按 QQ 号配置称呼与相处方式",
@@ -99,6 +117,7 @@
         "items": {
           "qq": {"type": "string", "description": "QQ 号", "default": ""},
           "nickname": {"type": "string", "description": "希望机器人使用的称呼", "default": ""},
+          "allow_learning": {"type": "bool", "description": "允许为此人提出学习建议（仍需审批）", "default": true},
           "relationship": {
             "type": "string",
             "description": "关系",
@@ -159,7 +178,7 @@
           "shared_memories": {
             "type": "text",
             "description": "已确认的共同经历与偏好",
-            "hint": "只填写实际发生或对方明确说过的内容。需要更新或删除时直接编辑此处；不会自动写入，也不会套到其他人身上。",
+            "hint": "只填写实际发生或对方明确说过的内容。学习建议批准后才写入，也可在此手动修改或删除；不会套到其他人身上。",
             "default": ""
           },
           "response_examples": {
