@@ -8,7 +8,7 @@
   "group_qq": {
     "type": "string",
     "description": "允许使用的 QQ 群号",
-    "hint": "留空时只响应你的私聊。填入一个目标群号后，该群任何人 @机器人都能聊天；每人独立保存上下文。",
+    "hint": "留空时只响应你的私聊。填入一个目标群号后，该群任何人 @机器人都能聊天；每人独立保存对话，可另外启用本群公共上下文。",
     "default": ""
   },
   "codex_exe": {
@@ -28,6 +28,30 @@
     "description": "接入 AstrBot 插件和人格",
     "hint": "开启后注册并选用本机 Codex 提供商，启用群内按发送者隔离，聊天经过 AstrBot 插件、人格和工具流程。升级后使用新的 AstrBot 会话；完整说明见 README。",
     "default": false
+  },
+  "group_context_enabled": {
+    "type": "bool",
+    "description": "共享目标群的近期公开聊天",
+    "hint": "按 QQ 号保留说话者身份，参考目标群其他成员的近期发言和机器人回复；包括没有 @机器人的文字。私聊和其他群不会混入。记录只保存在本机插件数据目录，随聊天请求发给 Codex。/new 只重开个人对话。",
+    "default": false
+  },
+  "group_context_max_messages": {
+    "type": "int",
+    "description": "本群近期上下文最多条数",
+    "hint": "默认 40，范围 2–100；每条最多保存 800 字符，包含机器人回复。",
+    "default": 40
+  },
+  "group_context_max_chars": {
+    "type": "int",
+    "description": "每次注入的本群上下文字符上限",
+    "hint": "默认 6000，范围 1000–16000；越大越容易接上历史话题，但会增加请求长度和耗时。",
+    "default": 6000
+  },
+  "group_context_max_minutes": {
+    "type": "int",
+    "description": "本群近期上下文保留时间（分钟）",
+    "hint": "默认 360，范围 5–1440。过期记录在下次使用或载入时清理；更久的公开事实由 LivingMemory 的 group 作用域保存。",
+    "default": 360
   },
   "fast_mode": {
     "type": "bool",

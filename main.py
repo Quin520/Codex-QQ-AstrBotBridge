@@ -15,6 +15,7 @@ from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.star import StarMetadata
 
 from .access import PermissionCheckedTool, QQToolPolicy
+from .group_context import GroupContext, is_proactive_group
 from .integration import configure_provider
 from .profile_learning import ProfileLearner
 from .profile_reviews import ProfileReviewStore
@@ -66,6 +67,9 @@ class LocalCodex(Star):
                     raise TypeError(f"User profile {key} must be a list.")
             self.profiles[qq] = profile
         self.data_dir = StarTools.get_data_dir("astrbot_plugin_local_codex")
+        self.group_context = GroupContext(
+            self.config, self.data_dir / "group_context.json"
+        )
         self.session_file = self.data_dir / "sessions.json"
         self.sessions = (
             json.loads(self.session_file.read_text(encoding="utf-8"))
@@ -172,10 +176,7 @@ class LocalCodex(Star):
         # spoken. Its trusted event type has no sender; never borrow a member's
         # personal profile for a message addressed to the entire group.
         proactive_group = (
-            type(event).__module__.endswith(
-                ".astrbot_plugin_proactive_chat.core.proactive_event"
-            )
-            and type(event).__name__ == "ProactiveMessageEvent"
+            is_proactive_group(event)
             and bool(str(self.config.get("owner_qq", "")).strip())
             and bool(event.get_group_id())
             and event.get_group_id() == str(self.config.get("group_qq", "")).strip()
@@ -196,6 +197,9 @@ class LocalCodex(Star):
             )
         if instructions:
             req.system_prompt = (req.system_prompt or "") + "\n" + instructions
+        req.system_prompt = (req.system_prompt or "") + self.group_context.instructions(
+            event, proactive=proactive_group
+        )
         # Public tools need an explicit reviewed allowlist. Never infer computer
         # access from a message, nickname, group role, or a plugin's tool name.
         if req.func_tool:
@@ -274,6 +278,7 @@ class LocalCodex(Star):
         Args:
             event: Incoming private message or group mention.
         """
+        self.group_context.observe(event)
         if self.config.get("integrate_plugins", False):
             accepted = self._accepts_event(event)
             # AstrBot 4.29 stores a suppression flag despite this method's name:
@@ -345,6 +350,7 @@ class LocalCodex(Star):
                     anchor = str(self.config.get("persona_anchor", "")).strip()
                     if anchor:
                         instructions = anchor + "\n" + instructions
+                    instructions += self.group_context.instructions(event)
                     if instructions:
                         prompt = instructions + "\n用户消息：\n" + prompt
                     thread_id, answer = await self.runner.run(
@@ -402,6 +408,11 @@ class LocalCodex(Star):
             yield event.plain_result("已为你开启新对话。直接发文字即可，群里请 @我。")
         finally:
             event.stop_event()
+
+    @filter.after_message_sent()
+    async def remember_group_reply(self, event: AstrMessageEvent) -> None:
+        """Keep successful public replies available to other group members."""
+        self.group_context.observe_reply(event)
 
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""

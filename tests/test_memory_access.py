@@ -163,6 +163,22 @@ class InstalledMemoryAccessTests(MemoryAccessTests):
                 )
         self.engine.search_memories.assert_not_awaited()
 
+    async def test_group_mode_shares_public_scope_and_keeps_private_separate(self):
+        self.memory_config._config["filtering_settings"]["memory_scope_mode"] = "group"
+        for sender in ("123", "999"):
+            event = event_for("What did the other member say?", sender, "456")
+            event.session_id = f"{sender}_456"
+            await self.run_recall(event)
+            self.assertEqual(
+                self.engine.search_memories.call_args.kwargs["session_id"],
+                "test:GroupMessage:456",
+            )
+        await self.run_recall(event_for("remember my private note", "123", ""))
+        self.assertEqual(
+            self.engine.search_memories.call_args.kwargs["session_id"],
+            "test:FriendMessage:123",
+        )
+
     async def test_disabling_plugin_revokes_already_wrapped_real_handler(self):
         self.star.activated = False
         with self.assertRaises(PermissionError):

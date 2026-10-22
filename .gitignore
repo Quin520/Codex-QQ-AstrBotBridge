@@ -26,6 +26,8 @@ config.toml
 credentials*
 sessions.json
 sessions.tmp
+group_context.json
+group_context.tmp
 builtin-new-command.json
 settings-before-permissions.json
 last-run.jsonl
