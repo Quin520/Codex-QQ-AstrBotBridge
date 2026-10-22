@@ -26,6 +26,27 @@
 
 此文件是基于原版 1.2.6 的累计补丁；已安装旧补丁时，先恢复原版源码或逐文件核对哈希后合并，不要直接叠加。回退时恢复源码和数据备份。市场更新可能覆盖补丁，更新后重新核对基线。此补丁和测试没有真实 QQ、群号、昵称、聊天记录或登录数据。
 
+## v0.3.15：随机间隔模式
+
+`interval-scheduling.patch` 是在上述累计补丁基础上的独立增量。先确认已经安装累计补丁，并核对 `interval-scheduling-baseline.json` 的 `before` 哈希；然后在主动插件目录执行：
+
+```powershell
+git -c core.autocrlf=false apply --check 'D:\Plugins\astrbot_plugin_local_codex\compat\proactive_chat\interval-scheduling.patch'
+git -c core.autocrlf=false apply 'D:\Plugins\astrbot_plugin_local_codex\compat\proactive_chat\interval-scheduling.patch'
+```
+
+重启 AstrBot 并刷新管理页面，然后在主动插件的群聊配置中设置：
+
+- **群聊主动发言触发方式**：`interval`（按随机间隔发言）。未设置时默认仍为 `idle`。
+- **最小/最大触发间隔**：例如 45 / 60 分钟。启动时直接抽取一次间隔，成功发送后再抽取下一轮；群员新消息及机器人正常回复不会推迟当前任务。
+- **按随机间隔发言的提示词**：可自定义。预设要求结合最近真实群聊、记忆和原人格，简短说一句，不假定群里冷场，不固定总结或反问。
+
+此模式不叠加“自动触发等待”或“群聊沉默时间”；“启用自动主动消息功能”是 `idle` 模式的启动等待开关，`interval` 由群聊总开关和插件启停控制。全局与单个会话均支持新模式及提示词，单个会话的覆盖配置优先。更新后请刷新旧管理页面再保存配置。
+
+免打扰时段到点会跳过发送并重排；连续无人回应达到上限后暂停，群员再发消息会清零计数并重新安排。生成期间有人聊天不会丢弃本轮，但插件停用、目标群关闭或进入免打扰后会阻止后续投递，包括工具语音和分段消息。发送失败不增加未回复次数，稍后重新安排。模型生成和语音合成需要时间，因此 45–60 分钟是触发间隔，不保证精确到秒收到消息。
+
+定时与手动主动任务共用同群互斥，避免重复生成；普通 `@` 对话仍可正常并行。调度会持久化，重启保留有效任务；切换模式或改变间隔时会丢弃不匹配的旧任务。倒计时显示在普通任务卡，`interval` 不再创建群沉默计时卡。继续使用已配置的群上下文来源、人格、模型和工具，保留已有 TTS/文字发送设置。
+
 ## 验证
 
 在主动插件目录设置 `ASTRBOT_CORE` 为 AstrBot 源码根目录，并使用它的 Python 环境：
@@ -35,10 +56,13 @@ $env:ASTRBOT_CORE = 'D:\AstrBot\core'
 $env:PYTHONPATH = $env:ASTRBOT_CORE
 python -m unittest discover -s tests -p test_bridge_sessions.py -v
 python tests/test_proactive_llm.py
+python -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
 测试使用真实 AstrBot 事件、调度器、工具执行器和临时 SQLite，覆盖多成员共享计时、活动取消任务、停用清理、历史迁移、群范围隔离、工具多轮执行、直接媒体投递只发送一次及失败处理。模型为测试替身，定时任务不会实际发送 QQ 消息。
 
+叠加随机间隔补丁后共 43 项：原兼容测试 17 项，间隔调度 13 项，发送控制 8 项，配置页面和会话覆盖 5 项。覆盖持续活跃、生成期插话、到期分发竞态、重启及模式切换、无人回应暂停恢复、免打扰和停用取消；配置页面测试通过 Node 执行真实 JavaScript 保存逻辑，需要本机 Node。
+
 ## 许可
 
-此补丁内主动插件的衍生代码遵循上游 AGPL-3.0，完整协议见 [AGPL-3.0.txt](AGPL-3.0.txt)，保留上游作者与版权声明。兼容修改由 Quin520 的 Codex-QQ-AstrBotBridge 提供；`changes.patch` 为全部修改源码，`baseline.json` 包含应用前后哈希。
+此补丁内主动插件的衍生代码遵循上游 AGPL-3.0，完整协议见 [AGPL-3.0.txt](AGPL-3.0.txt)，保留上游作者与版权声明。兼容修改由 Quin520 的 Codex-QQ-AstrBotBridge 提供；`changes.patch` 及 `interval-scheduling.patch` 提供修改源码，各自对应的 baseline JSON 包含应用前后哈希。

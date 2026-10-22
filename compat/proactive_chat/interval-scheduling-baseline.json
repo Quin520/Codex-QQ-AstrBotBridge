@@ -1,0 +1,62 @@
+{
+  "_conf_schema.json": {
+    "before": "5708df5833696aad91922d9cd84d18223d8df87329b56a830c0d512fa01f6aaa",
+    "after": "56eadfda358c97d9a5f4a7d1204c13e017bacc4105d46fa5b2a6712c3b52a3f7"
+  },
+  "admin/js/components/config/ConfigRenderer.jsx": {
+    "before": "9ced90ebee82bdf6b96502bc3f7a7cec63120788c7841225749224c547ec9433",
+    "after": "5becf6ea4a86e1dddfabcfb753945f3dd749d022d9dea6bf6a5acf15397ce8bb"
+  },
+  "core/chat_flow.py": {
+    "before": "4e5e56a5fa3095ca0fe654a3372fe0384f4eaa251a99e6b0f4ecf4455441f405",
+    "after": "b75d01c9463ad3082a9daae03ca26965f519dca7545d648e0dd10c3441550148"
+  },
+  "core/data_storage.py": {
+    "before": "c4b562b3628472d498ac589f218120d9aa824f41b0667ddc74bac3a3a5a3ec78",
+    "after": "bcd5b0a05fe4540d99eba631a7c235eb84bcbc6fa2e869ddc42428e31bc31c8d"
+  },
+  "core/llm_adapter.py": {
+    "before": "b272b97ff4e74e66bffb927b65080e7358170f40663c5e8e0ff677e30f8f255a",
+    "after": "35aa59e1ed3a2271c6f2ae2f4645afe8f286c0c8e349bb626f0d4a7c18363a7a"
+  },
+  "core/message_events.py": {
+    "before": "49684893a476bdb6c54a5ef75adc3af9fc74f8a2d232e799eba78ae78619d2cd",
+    "after": "66969a27a97f97cb357ba52a2e6684cc6ad2290adc3b2ff4fac22f4ffce05583"
+  },
+  "core/message_sender.py": {
+    "before": "87047c3d92b51c563bcf3ab99de62e61681d9b859edfa291b1a6c5118960321e",
+    "after": "f6d1862ed71cdb1d0c063de009e5bead47841d94834cec08fd080ec94cc30754"
+  },
+  "core/plugin_lifecycle.py": {
+    "before": "f912cb15503b3af17ff63a4073d9364904db8c738c2b32d6a2bdac8e791661d2",
+    "after": "0ae289120df4a35a5c2f5caa74738a089808ce93ff0a50baa7e3dbd30cd38407"
+  },
+  "core/proactive_event.py": {
+    "before": "85aba23e56934eb98e2c9efccafe9463fc02689520687bb3dd5139f2492ff244",
+    "after": "68534916296171177600edb54a0f2ad31f3f96b7d02c57e9983dc22431f52140"
+  },
+  "core/session_override_manager.py": {
+    "before": "64812baa76a87084eb2cbe31de85e49bc45a7de8a92358b482d0370abb6d662f",
+    "after": "04467c93d14a085e59160f61175ac57f6e2b529a4db7cd5331909c956ceb0368"
+  },
+  "core/task_scheduler.py": {
+    "before": "0439eea220c86f161ad5edd9204cb9889a144baf55870a2e9db4131653247f51",
+    "after": "74557631941a548089609e74d41356a43d6ab4790fb049cb98344507ebfd9d6a"
+  },
+  "tests/test_interval_config_ui.py": {
+    "before": null,
+    "after": "d8977046bf2c29cca35996fc33022b0d847d55658e7748f272fa8761375b61cd"
+  },
+  "tests/test_interval_scheduling.py": {
+    "before": null,
+    "after": "9defc038b97d92b9f1afb42d5e35cd2df72b0b5dabeb42063e53d19ca3abc856"
+  },
+  "tests/test_proactive_delivery_guard.py": {
+    "before": null,
+    "after": "40a1e1352143d793ce00eea81aa1ae031e532dd7e9a9be81574a6576eb4c0b0a"
+  },
+  "tests/test_proactive_llm.py": {
+    "before": "0c69ea438c6d59849da1906bc01ea1f44bff49db536c16c076d6adb41b89c0a7",
+    "after": "0de3ce853348af03022514d770406a21febcf2747919e452cd4bc00307562160"
+  }
+}

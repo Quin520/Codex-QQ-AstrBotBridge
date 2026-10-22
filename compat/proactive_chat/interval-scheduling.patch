@@ -1,0 +1,1375 @@
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -275,6 +275,14 @@
+                 "default": false,
+                 "hint": "只有在会话列表中明确配置的群聊才会获得主动消息服务，避免给未配置的会话提供服务"
+             },
++            "trigger_mode": {
++                "description": "群聊主动发言触发方式",
++                "type": "string",
++                "options": ["idle", "interval"],
++                "labels": ["群里安静后发言", "按随机间隔发言"],
++                "default": "idle",
++                "hint": "idle：先等待群沉默，再随机安排主动消息。interval：直接按下方最小/最大间隔随机安排，群员与机器人聊天不重置倒计时；仍遵守免打扰、无人回应上限和插件开关。"
++            },
+             "session_list": {
+                 "description": "📋 群聊会话 UMO 列表",
+                 "type": "list",
+@@ -289,13 +297,13 @@
+                         "description": "✅ 启用自动主动消息功能",
+                         "type": "bool",
+                         "default": false,
+-                        "hint": "插件启动后，如果群聊在设定时间内没有收到消息且没有已存在的持久化任务，就会自动触发一次主动消息任务创建"
++                        "hint": "仅 idle 模式使用：启动后没有群消息时，额外启动等待计时。interval 模式直接按随机间隔运行，不使用此开关；通过群聊总开关或停用插件停止主动发言。"
+                     },
+                     "auto_trigger_after_minutes": {
+                         "description": "⏱️ 自动触发等待时间 (分钟)",
+                         "type": "int",
+                         "default": 5,
+-                        "hint": "插件启动后，如果群聊在 X 分钟内没有收到消息，且当前没有正在运行的主动消息任务，则自动触发一次主动消息任务创建",
++                        "hint": "仅 idle 模式使用：启动后如果群聊 X 分钟没有收到消息且没有任务，开始安排主动消息。interval 模式不额外等待这段时间。",
+                         "slider": {
+                             "min": 1,
+                             "max": 1440,
+@@ -308,7 +316,7 @@
+                 "description": "⏳ 群聊沉默触发时间 (分钟)",
+                 "type": "int",
+                 "default": 30,
+-                "hint": "当群聊中连续 X 分钟没有任何新消息时，才会开始计划一次主动消息",
++                "hint": "仅 idle 模式使用：群聊连续 X 分钟没有新消息后开始计划主动消息。interval 模式不使用沉默条件。",
+                 "slider": {
+                     "min": 1,
+                     "max": 1440,
+@@ -320,6 +328,12 @@
+                 "type": "text",
+                 "default": "[系统任务：群聊主动破冰]\n你被授权在群聊中发起一次“主动消息”以活跃气氛。你的回复必须完全符合你的人格设定，并严格遵守所有的输出规则。\n\n[情景分析]\n- 这个群聊好像已经冷清了一段时间了，我应该说些什么来让大家重新聊起来。\n- 当前时间是: {{current_time}}。\n- 我上次在这个群里主动说话但没人理我的次数是: {{unanswered_count}} 次。\n\n[行动指南]\n1.  回顾群聊的聊天记录，看看大家最后在讨论什么有趣的话题，如果没有聊完，尝试延续它。\n2.  向群里的所有人，提出一个开放性的、大家都能参与进来的问题。\n\n[最终指令]\n请综合以上所有信息，用最像你自己的、最自然的方式，生成一句能在群聊中打破僵局、活跃气氛的开场白。",
+                 "hint": "这段话将指导LLM在群聊中发起主动消息时的思考。你可以使用 {{unanswered_count}} (未回复次数) 和 {{current_time}} (当前时间) 这两个占位符"
++            },
++            "interval_prompt": {
++                "description": "按随机间隔发言的提示词",
++                "type": "text",
++                "default": "[任务：自然参与群聊]\n现在按随机间隔轮到你主动说一句话。群里可能正在热聊，也可能安静，不要假定群冷场。\n当前时间：{{current_time}}。连续主动发言尚无人回应次数：{{unanswered_count}}。\n结合本次提供的最近真实群聊、共同记忆和原有人格，只说一句简短自然的话。优先接最近正在聊的话题、一个有趣细节或明确的共同兴趣；没有合适线索时可轻轻开启新话题。\n不逐条总结群聊，不固定反问，不催大家互动，不解释定时任务或后台流程，不编造刚刚发生的事或共同经历。不要把最后发言者当成唯一对话对象；尊重每个成员的称呼和边界。只输出这次想说的话，必要时可按现有规则配表情或语音。",
++                "hint": "仅 interval 模式使用，可直接修改。支持 {{current_time}} 和 {{unanswered_count}}；原人格、群上下文和工具规则继续生效。"
+             },
+             "context_settings": {
+                 "description": "🧩 上下文注入设置",
+--- a/admin/js/components/config/ConfigRenderer.jsx
++++ b/admin/js/components/config/ConfigRenderer.jsx
+@@ -557,6 +557,8 @@
+     const rootItems = schema?.[rootKey]?.items || {};
+     const orderedKeys = [
+         'auto_trigger_settings',
++        'trigger_mode',
++        'interval_prompt',
+         'group_idle_trigger_minutes',
+         'proactive_prompt',
+         'context_settings',
+--- a/core/chat_flow.py
++++ b/core/chat_flow.py
+@@ -17,6 +17,7 @@
+ )
+ 
+ from ..utils.time_utils import is_quiet_time
++from .task_scheduler import is_group_interval_config
+ 
+ 
+ class ProactiveCoreMixin:
+@@ -182,6 +183,11 @@
+         async with self.data_lock:
+             # 更新未回复计数器
+             # 每次主动发送成功后，未回复次数 +1
++            session_config = self._get_session_config(normalized_session_id)
++            if is_group_interval_config(session_config):
++                unanswered_count = self.session_data.get(normalized_session_id, {}).get(
++                    "unanswered_count", 0
++                )
+             new_unanswered_count = unanswered_count + 1
+             self.session_data.setdefault(normalized_session_id, {})[
+                 "unanswered_count"
+@@ -233,7 +239,29 @@
+                 f"[主动消息] 已为 {self._get_session_log_str(normalized_session_id, scheduled_job_payload['session_config'])} 安排下一次主动消息喵，时间：{scheduled_job_payload['run_date'].strftime('%Y-%m-%d %H:%M:%S')} 喵。"
+             )
+ 
++        if is_group_interval_config(session_config):
++            await self._schedule_next_chat_and_save(normalized_session_id)
++
+     async def check_and_chat(self, session_id: str) -> None:
++        """Run at most one delivery per normalized session, including manual jobs."""
++        normalized = self._normalize_session_id(session_id)
++        active = getattr(self, "_active_chat_sessions", None)
++        if active is None:
++            self._active_chat_sessions = active = set()
++        if normalized in active:
++            return
++        active.add(normalized)
++        tasks = getattr(self, "_active_chat_tasks", None)
++        if tasks is None:
++            self._active_chat_tasks = tasks = {}
++        tasks[normalized] = asyncio.current_task()
++        try:
++            await self._check_and_chat_impl(normalized)
++        finally:
++            active.discard(normalized)
++            tasks.pop(normalized, None)
++
++    async def _check_and_chat_impl(self, session_id: str) -> None:
+         """由定时任务触发的核心函数，完成一次完整的主动消息流程。"""
+         # 在途任务在插件终止后应立即退出，避免重载期间发出幽灵主动消息。
+         if getattr(self, "_terminating", False):
+@@ -280,6 +308,9 @@
+                     logger.info(
+                         f"[主动消息] {self._get_session_log_str(normalized_session_id, session_config)} 的未回复次数 ({unanswered_count}) 已达到上限 ({max_unanswered})，暂停主动消息喵。"
+                     )
++                    if is_group_interval_config(session_config):
++                        if self._clear_session_schedule_state(normalized_session_id):
++                            await self._save_data_internal()
+                     return
+ 
+             logger.info(
+@@ -371,12 +402,13 @@
+                 < task_start_state["unanswered_count"]
+             )
+ 
+-            if has_new_message and not direct_delivery:
++            interval_mode = is_group_interval_config(session_config)
++            if has_new_message and not direct_delivery and not interval_mode:
+                 logger.info(
+                     "[主动消息] 检测到用户在LLM生成期间发送了新消息，丢弃本次主动消息喵。"
+                 )
+                 return
+-            if has_new_message and direct_delivery:
++            if has_new_message and (direct_delivery or interval_mode):
+                 # A tool already delivered media; retain the new activity's
+                 # counter reset when accounting for this completed delivery.
+                 unanswered_count = current_state["unanswered_count"]
+@@ -385,6 +417,13 @@
+             if getattr(self, "_terminating", False) and not direct_delivery:
+                 logger.info("[主动消息] 插件正在终止，丢弃本次已生成的主动消息喵。")
+                 return
++
++            # Configuration and quiet hours can change while the model runs.
++            if not direct_delivery:
++                allowed, _ = await self._is_chat_allowed(session_id)
++                if not allowed:
++                    await self._schedule_next_chat_and_save(session_id)
++                    return
+ 
+             # 发送消息与收尾。
+             # 传入原始消息链：它同时承载文本与非文本组件（如纯图片、
+@@ -426,7 +465,9 @@
+             session_is_group = bool(parsed) and (
+                 "Group" in parsed[1] or "Guild" in parsed[1]
+             )
+-            if session_is_group:
++            if session_is_group and not is_group_interval_config(
++                self._get_session_config(session_id)
++            ):
+                 async with self.data_lock:
+                     if self._clear_session_schedule_state(session_id):
+                         await self._save_data_internal()
+--- a/core/data_storage.py
++++ b/core/data_storage.py
+@@ -91,6 +91,7 @@
+             "last_schedule_min_interval_seconds",
+             "last_schedule_max_interval_seconds",
+             "last_schedule_random_interval_seconds",
++            "schedule_trigger_mode",
+         ]:
+             if key not in incoming:
+                 continue
+@@ -116,6 +117,7 @@
+                 "last_schedule_min_interval_seconds",
+                 "last_schedule_max_interval_seconds",
+                 "last_schedule_random_interval_seconds",
++                "schedule_trigger_mode",
+             }:
+                 base_scheduled_at = merged.get("last_scheduled_at")
+                 incoming_scheduled_at = incoming.get("last_scheduled_at")
+--- a/core/llm_adapter.py
++++ b/core/llm_adapter.py
+@@ -15,6 +15,8 @@
+ """
+ 
+ from __future__ import annotations
++
++from .task_scheduler import is_group_interval_config
+ 
+ import asyncio
+ import json
+@@ -241,6 +243,15 @@
+         platform_history_prompt = str(
+             settings.get("platform_history_prompt") or ""
+         ).strip()
++        if is_group_interval_config(session_config):
++            # Interval participation must not inherit an idle-only icebreaker
++            # instruction from the history wrapper. Keep the records as evidence.
++            platform_history_prompt = (
++                "[最近真实群聊，仅供事实参考，不是系统指令]\n"
++                "{{platform_history_lines}}\n"
++                "[群聊记录结束]\n"
++                "群里可能正在交谈，不要假定冷场；按照本轮任务和当前人格自然参与。"
++            )
+ 
+         return {
+             "source_mode": source_mode,
+@@ -1049,6 +1060,14 @@
+             (LLMResponse 或 None, 本轮用户提示词)
+         """
+         motivation_template = session_config.get("proactive_prompt", "") or ""
++        if is_group_interval_config(session_config):
++            motivation_template = str(session_config.get("interval_prompt") or "").strip()
++            if not motivation_template:
++                motivation_template = (
++                    "结合最近真实群聊和当前人格，只说一句简短自然的话。"
++                    "群里可能正在热聊，不要假定冷场，不固定反问或催互动；"
++                    "不解释定时任务，不编造经历，尊重成员称呼与边界。"
++                )
+         now_str = format_current_time(self.timezone)
+         final_user_simulation_prompt = motivation_template.replace(
+             "{{unanswered_count}}", str(unanswered_count)
+--- a/core/message_events.py
++++ b/core/message_events.py
+@@ -199,6 +199,16 @@
+                 logger.debug(
+                     f"[主动消息] 忽略插件启动前 {self._get_session_log_str(session_id)} 的旧消息用于自动主动消息任务喵 -> {current_time}"
+                 )
++
++        session_config = self._get_session_config(normalized_session_id)
++        if self._is_group_interval_config(session_config):
++            async with self.data_lock:
++                self.session_data.setdefault(normalized_session_id, {})[
++                    "unanswered_count"
++                ] = 0
++                await self._save_data_internal()
++            await self._ensure_group_interval_job(normalized_session_id)
++            return
+ 
+         # 取消自动触发
+         auto_trigger_cancelled = await self._cancel_all_related_auto_triggers(
+@@ -310,6 +320,18 @@
+         if "group" not in normalized_session_id.lower():
+             return
+ 
++        if self._is_group_interval_config(self._get_session_config(normalized_session_id)):
++            # Bot replies are activity, but are not answers to its own proactive
++            # messages and must neither reset the counter nor move the deadline.
++            current_time = time.time()
++            self.last_message_times[normalized_session_id] = current_time
++            async with self.data_lock:
++                self.session_data.setdefault(normalized_session_id, {})[
++                    "last_message_time"
++                ] = current_time
++                await self._save_data_internal()
++            return
++
+         # Bot 自己发言后，清理已计划的调度任务，避免重复触发
+         try:
+             self.scheduler.remove_job(normalized_session_id)
+--- a/core/message_sender.py
++++ b/core/message_sender.py
+@@ -31,6 +31,7 @@
+     build_proactive_event_for_session,
+     dispatch_event_hook,
+     is_group_session,
++    is_proactive_delivery_allowed,
+     resolve_message_type,
+ )
+ 
+@@ -391,6 +392,8 @@
+         """
+         if not components:
+             return False
++        if not await is_proactive_delivery_allowed(self, session_id):
++            return False
+ 
+         chain = MessageChain(list(components))
+         parsed = self._parse_session_id(session_id)
+@@ -450,6 +453,8 @@
+         Returns:
+             True 表示已成功送达；False 表示未送达。
+         """
++        if not await is_proactive_delivery_allowed(self, session_id):
++            return False
+         try:
+             result = await self.context.send_message(session_id, chain)
+         except Exception as e:
+@@ -477,6 +482,9 @@
+             True 表示已成功送达；False 表示所有发送路径均未送达。
+         """
+         if not components:
++            return False
++        if not await is_proactive_delivery_allowed(self, session_id):
++            self._mark_event_send_failed(event)
+             return False
+ 
+         chain = MessageChain(list(components))
+@@ -557,6 +565,10 @@
+             not getattr(event, "_has_send_oper", False)
+             or getattr(event, "proactive_send_failed", False)
+             or not getattr(event, "proactive_sent_chains", None)
++        ):
++            return False
++        if not direct_delivery and not await is_proactive_delivery_allowed(
++            self, session_id
+         ):
+             return False
+ 
+@@ -602,8 +614,10 @@
+                     )
+ 
+         # 是否继续发送文本：未发出 TTS 或配置要求始终发文本
+-        should_send_text = not direct_delivery and (
+-            not is_tts_sent or tts_conf.get("always_send_text", True)
++        should_send_text = (
++            not direct_delivery
++            and (not is_tts_sent or tts_conf.get("always_send_text", True))
++            and await is_proactive_delivery_allowed(self, session_id)
+         )
+ 
+         # 发送结果汇总：未送达的内容不得计入“已发送”，
+@@ -695,7 +709,11 @@
+         # 发送后钩子：装饰器可据此补发延迟内容（如分段表情图片）。
+         # 钩子内通过 event.send() 补发的消息会由事件层自动补写平台流水，
+         # 因此同样能被后续主动消息的上下文来源读取。
+-        if event is not None and EventType is not None:
++        if (
++            event is not None
++            and EventType is not None
++            and await is_proactive_delivery_allowed(self, session_id)
++        ):
+             try:
+                 await dispatch_event_hook(event, EventType.OnAfterMessageSentEvent)
+             except Exception as e:
+--- a/core/plugin_lifecycle.py
++++ b/core/plugin_lifecycle.py
+@@ -51,6 +51,8 @@
+         """插件的异步初始化函数。"""
+         # 复位终止标志：同一进程重载场景下可能复用旧的终止状态。
+         self._terminating = False
++        self._active_chat_sessions: set[str] = set()
++        self._active_chat_tasks: dict[str, asyncio.Task] = {}
+         # 复位延迟启动状态：插件重载会创建新实例，需要重新判定平台时序。
+         self._startup_finalized = False
+         self._startup_lock = asyncio.Lock()
+@@ -292,6 +294,15 @@
+         # 置位终止标志
+         self._terminating = True
+ 
++        # Manual and scheduled deliveries share this registry. Cancel them even
++        # when telemetry is disabled, before any awaited shutdown operation.
++        active_chats = [
++            task for task in getattr(self, "_active_chat_tasks", {}).values()
++            if task is not asyncio.current_task() and not task.done()
++        ]
++        for task in active_chats:
++            task.cancel()
++
+         # 先同步取消尚未完成的延迟启动任务，避免终止后仍恢复出新的调度任务。
+         startup_task = getattr(self, "_startup_task", None)
+         self._startup_task = None
+@@ -330,6 +341,8 @@
+         logger.info(f"[主动消息] 已取消 {auto_trigger_count} 个自动触发计时器喵。")
+ 
+         try:
++            if active_chats:
++                await asyncio.gather(*active_chats, return_exceptions=True)
+             if startup_task:
+                 try:
+                     await startup_task
+--- a/core/proactive_event.py
++++ b/core/proactive_event.py
+@@ -72,6 +72,28 @@
+ _PRIVATE_MESSAGE_TYPE_TOKENS = frozenset(
+     {"friendmessage", "privatemessage", "friend", "private"}
+ )
++
++
++async def is_proactive_delivery_allowed(plugin: Any, session_id: str) -> bool:
++    """Recheck live delivery controls at each outbound boundary.
++
++    Args:
++        plugin: Owner of the proactive event and its current configuration.
++        session_id: Canonical destination session.
++
++    Returns:
++        Whether the plugin is running and its current session controls allow
++        delivery. Generic event consumers without a chat policy keep their
++        existing behavior. New group activity does not cancel interval delivery.
++    """
++    if plugin is None or getattr(plugin, "_terminating", False):
++        return False
++    checker = getattr(plugin, "_is_chat_allowed", None)
++    if callable(checker):
++        allowed, _reason = await checker(session_id)
++        if not allowed:
++            return False
++    return not getattr(plugin, "_terminating", False)
+ 
+ 
+ def is_group_session(umo: str) -> bool:
+@@ -378,6 +400,9 @@
+         plugin = self._proactive_plugin
+         if plugin is None:
+             return False
++        if not await is_proactive_delivery_allowed(plugin, self._proactive_umo):
++            self.proactive_send_failed = True
++            return False
+ 
+         self.proactive_sent_chains.append(message)
+ 
+@@ -425,6 +450,8 @@
+         plugin = self._proactive_plugin
+         if plugin is None:
+             return False
++        if not await is_proactive_delivery_allowed(plugin, self._proactive_umo):
++            return False
+         try:
+             result = await plugin.context.send_message(self._proactive_umo, message)
+         except Exception as e:  # pragma: no cover - 取决于运行时
+--- a/core/session_override_manager.py
++++ b/core/session_override_manager.py
+@@ -27,6 +27,8 @@
+         "tts_settings",
+         "segmented_reply_settings",
+         "group_idle_trigger_minutes",
++        "trigger_mode",
++        "interval_prompt",
+     }
+ 
+     def __init__(self, storage_dir: Path):
+@@ -177,6 +179,11 @@
+         for key, value in patch.items():
+             if depth == 0 and key not in self.ALLOWED_ROOT_KEYS:
+                 continue
++            if depth == 0 and key == "trigger_mode":
++                if not isinstance(value, str) or value not in {"idle", "interval"}:
++                    raise ValueError("trigger_mode must be idle or interval")
++            if depth == 0 and key == "interval_prompt" and not isinstance(value, str):
++                raise ValueError("interval_prompt must be a string")
+             child = self._sanitize_patch(value, depth + 1)
+             if isinstance(child, dict) and not child:
+                 continue
+--- a/core/task_scheduler.py
++++ b/core/task_scheduler.py
+@@ -9,6 +9,15 @@
+ from typing import Any
+ 
+ from astrbot.api import logger
++
++
++def is_group_interval_config(session_config: dict | None) -> bool:
++    """Return whether this group uses activity-independent intervals."""
++    return bool(
++        session_config
++        and session_config.get("_session_type") == "group"
++        and session_config.get("trigger_mode", "idle") == "interval"
++    )
+ 
+ 
+ class SchedulerMixin:
+@@ -25,12 +34,31 @@
+     session_temp_state: dict[str, dict]
+     _cleanup_counter: int
+ 
++    _is_group_interval_config = staticmethod(is_group_interval_config)
++
++    def _cancel_group_silence_timer(self, session_id: str) -> None:
++        """Cancel silence timers for all aliases of one normalized group."""
++        normalized = self._normalize_session_id(session_id)
++        for key in list(self.group_timers):
++            if self._normalize_session_id(key) == normalized:
++                self.group_timers.pop(key).cancel()
++
++    async def _ensure_group_interval_job(self, session_id: str) -> None:
++        """Start a missing interval without postponing pending or running work."""
++        self._cancel_group_silence_timer(session_id)
++        await self._cancel_all_related_auto_triggers(session_id)
++        await self._schedule_next_chat_and_save(session_id, only_if_missing=True)
++
+     async def _setup_auto_trigger(self, session_id: str, silent: bool = False) -> None:
+         """为指定会话设置自动主动消息触发器。"""
+         # 计时器键统一使用规范化键，与 job id / 事件侧 last_message_times 保持一致。
+         session_id = self._normalize_session_id(session_id)
+         session_config = self._get_session_config(session_id)
+         if not session_config:
++            return
++
++        if self._is_group_interval_config(session_config):
++            await self._ensure_group_interval_job(session_id)
+             return
+ 
+         # 读取自动触发配置
+@@ -154,9 +182,30 @@
+         if not session_config or not session_config.get("enable", False):
+             return False
+ 
++        mode = "interval" if self._is_group_interval_config(session_config) else "idle"
++        if session_info.get("schedule_trigger_mode", "idle") != mode:
++            return False
++        if mode == "interval":
++            settings = session_config.get("schedule_settings", {})
++            minimum = int(settings.get("min_interval_minutes", 30)) * 60
++            maximum = max(minimum, int(settings.get("max_interval_minutes", 900)) * 60)
++            if (
++                session_info.get("last_schedule_min_interval_seconds") != minimum
++                or session_info.get("last_schedule_max_interval_seconds") != maximum
++            ):
++                return False
++
+         next_trigger = session_info.get("next_trigger_time")
+         if not isinstance(next_trigger, (int, float)):
+             return False
++        if mode == "interval":
++            scheduled_at = session_info.get("last_scheduled_at")
++            delay = session_info.get("last_schedule_random_interval_seconds")
++            if not isinstance(scheduled_at, (int, float)) or not isinstance(delay, (int, float)):
++                return False
++            # Older aliases may merge a late idle deadline with newer metadata.
++            if abs(next_trigger - (scheduled_at + delay)) > 0.001:
++                return False
+ 
+         check_time = current_time if current_time is not None else time.time()
+         # 与 APScheduler misfire_grace_time 保持一致，允许 60 秒轻微抖动
+@@ -184,6 +233,7 @@
+             protected_keys.add("self_id")
+ 
+         schedule_keys = {
++            "schedule_trigger_mode",
+             "next_trigger_time",
+             "last_scheduled_at",
+             "last_schedule_min_interval_seconds",
+@@ -312,7 +362,7 @@
+         if group_settings.get("enable", False):
+             for session_id in group_settings.get("session_list", []):
+                 result = await self._setup_auto_trigger_for_session_config(
+-                    group_settings, session_id
++                    {**group_settings, "_session_type": "group"}, session_id
+                 )
+                 if result == "created":
+                     auto_trigger_count += 1
+@@ -368,6 +418,7 @@
+     ) -> str:
+         """为指定会话配置设置自动触发器。"""
+         # 返回值：created/existing/invalid/disabled/max_unanswered，用于日志汇总与原因归类
++        session_id = self._resolve_session_id_for_config(session_id, settings)
+         session_config = self._get_session_config(session_id)
+         if not session_config or not session_config.get("enable", False):
+             # 未命中 session_list 或被禁用，都视为无效会话
+@@ -377,6 +428,12 @@
+         resolved_session_id = self._resolve_session_id_for_config(
+             session_id, session_config
+         )
++
++        if self._is_group_interval_config(session_config):
++            await self._ensure_group_interval_job(resolved_session_id)
++            return "created" if self.scheduler.get_job(
++                self._normalize_session_id(resolved_session_id)
++            ) else "max_unanswered"
+ 
+         auto_trigger_settings = session_config.get("auto_trigger_settings", {})
+         if not auto_trigger_settings.get("enable_auto_trigger", False):
+@@ -510,7 +567,7 @@
+             logger.info("[主动消息] 没有需要恢复的定时任务喵。")
+ 
+     async def _schedule_next_chat_and_save(
+-        self, session_id: str, reset_counter: bool = False
++        self, session_id: str, reset_counter: bool = False, *, only_if_missing: bool = False
+     ) -> None:
+         """安排下一次主动聊天并立即将状态持久化到文件。"""
+         # 终止后不再注册任何新任务，避免在已关闭的调度器上留下持久化幽灵任务。
+@@ -519,12 +576,42 @@
+ 
+         normalized_session_id = self._normalize_session_id(session_id)
+         session_config = self._get_session_config(normalized_session_id)
+-        if not session_config:
++        if not session_config or not session_config.get("enable", False):
++            self._purge_related_jobs(normalized_session_id)
++            async with self.data_lock:
++                if self._clear_session_schedule_state(normalized_session_id):
++                    await self._save_data_internal()
+             return
+ 
+         schedule_conf = session_config.get("schedule_settings", {})
++        is_interval = self._is_group_interval_config(session_config)
++        if is_interval:
++            self._cancel_group_silence_timer(normalized_session_id)
++            await self._cancel_all_related_auto_triggers(normalized_session_id)
+ 
+         async with self.data_lock:
++            # Event callbacks may race startup or a due job. Only the task that
++            # completes delivery may replace an in-flight interval.
++            if getattr(self, "_terminating", False):
++                return
++            if only_if_missing and normalized_session_id in getattr(
++                self, "_active_chat_sessions", set()
++            ):
++                return
++            # APScheduler removes a date job just before its coroutine starts.
++            # A message in that gap must not create a competing next interval.
++            payload = self.session_data.get(normalized_session_id, {})
++            if (
++                only_if_missing
++                and self._is_persisted_task_still_valid(normalized_session_id, payload)
++                and payload.get("next_trigger_time", float("inf")) <= time.time()
++            ):
++                return
++            if only_if_missing and self.scheduler.get_job(normalized_session_id):
++                if self._is_persisted_task_still_valid(
++                    normalized_session_id, self.session_data.get(normalized_session_id)
++                ):
++                    return
+             # 如果存在非规范化的旧键，迁移到规范化键
+             if normalized_session_id != session_id and session_id in self.session_data:
+                 existing_payload = self.session_data.get(session_id, {})
+@@ -546,6 +633,17 @@
+                     "unanswered_count"
+                 ] = 0
+ 
++            if is_interval:
++                maximum = schedule_conf.get("max_unanswered_times", 3)
++                unanswered = self.session_data.get(normalized_session_id, {}).get(
++                    "unanswered_count", 0
++                )
++                if maximum > 0 and unanswered >= maximum:
++                    self._purge_related_jobs(normalized_session_id)
++                    if self._clear_session_schedule_state(normalized_session_id):
++                        await self._save_data_internal()
++                    return
++
+             # 计算随机触发时间
+             min_interval = int(schedule_conf.get("min_interval_minutes", 30)) * 60
+             max_interval = max(
+@@ -561,6 +659,7 @@
+             self._add_chat_job(normalized_session_id, run_date)
+ 
+             session_payload = self.session_data.setdefault(normalized_session_id, {})
++            session_payload["schedule_trigger_mode"] = "interval" if is_interval else "idle"
+             session_payload["next_trigger_time"] = next_trigger_time
+             session_payload["last_scheduled_at"] = scheduled_at
+             session_payload["last_schedule_min_interval_seconds"] = min_interval
+@@ -577,6 +676,10 @@
+         normalized_session_id = self._normalize_session_id(session_id)
+         session_config = self._get_session_config(normalized_session_id)
+         if not session_config or not session_config.get("enable", False):
++            return
++
++        if self._is_group_interval_config(session_config):
++            self._cancel_group_silence_timer(normalized_session_id)
+             return
+ 
+         # 取消旧计时器（包含旧键）
+@@ -640,6 +743,9 @@
+                     )
+                     return
+ 
++                if self._is_group_interval_config(current_config):
++                    return
++
+                 # 仅在插件启动后未收到任何消息时触发
+                 last_message_time = self.last_message_times.get(session_id, 0)
+                 current_time = time.time()
+@@ -717,6 +823,9 @@
+                     )
+                     return
+ 
++                if self._is_group_interval_config(current_config):
++                    return
++
+                 current_unanswered = self.session_data.get(session_id, {}).get(
+                     "unanswered_count", 0
+                 )
+--- /dev/null
++++ b/tests/test_interval_config_ui.py
+@@ -0,0 +1,157 @@
++"""Check interval settings survive session configuration and UI saves."""
++
++from __future__ import annotations
++
++import importlib.util
++import json
++import os
++import shutil
++import subprocess
++import tempfile
++import unittest
++from pathlib import Path
++
++_runtime = tempfile.TemporaryDirectory(prefix="proactive-ui-test-")
++os.environ.setdefault("ASTRBOT_ROOT", _runtime.name)
++ROOT = Path(__file__).resolve().parents[1]
++SPEC = importlib.util.spec_from_file_location(
++    "interval_override_audit", ROOT / "core/session_override_manager.py"
++)
++MODULE = importlib.util.module_from_spec(SPEC)
++SPEC.loader.exec_module(MODULE)
++SessionOverrideManager = MODULE.SessionOverrideManager
++
++
++class IntervalConfigurationTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.directory = tempfile.TemporaryDirectory(prefix="proactive-overrides-")
++        self.addCleanup(self.directory.cleanup)
++        self.path = Path(self.directory.name)
++        self.manager = SessionOverrideManager(self.path)
++        self.session = "test:GroupMessage:456"
++        self.base = {
++            "enable": True,
++            "trigger_mode": "idle",
++            "interval_prompt": "Default interval wording.",
++            "schedule_settings": {
++                "min_interval_minutes": 45,
++                "max_interval_minutes": 60,
++            },
++        }
++
++    async def test_effective_edit_roundtrips_mode_and_multiline_prompt(self):
++        effective = {
++            **self.base,
++            "trigger_mode": "interval",
++            "interval_prompt": "Refer to the current topic.\nSay one short thing.",
++            "password": "must not enter overrides",
++        }
++        await self.manager.update_session_from_effective(
++            self.session, self.base, effective
++        )
++        reloaded = SessionOverrideManager(self.path)
++        override = reloaded.get_override(self.session)
++        self.assertEqual(override["trigger_mode"], "interval")
++        self.assertEqual(override["interval_prompt"], effective["interval_prompt"])
++        self.assertNotIn("password", override)
++        actual = reloaded.get_effective(self.session, self.base)
++        self.assertEqual(
++            actual,
++            {key: value for key, value in effective.items() if key != "password"},
++        )
++
++    async def test_explicit_idle_can_override_interval_and_empty_prompt_is_preserved(
++        self,
++    ):
++        base = {**self.base, "trigger_mode": "interval"}
++        await self.manager.set_override(
++            self.session, {"trigger_mode": "idle", "interval_prompt": ""}
++        )
++        actual = SessionOverrideManager(self.path).get_effective(self.session, base)
++        self.assertEqual(actual["trigger_mode"], "idle")
++        self.assertEqual(actual["interval_prompt"], "")
++
++    async def test_invalid_new_field_types_do_not_replace_saved_override(self):
++        original = {"trigger_mode": "interval", "interval_prompt": "A short prompt."}
++        await self.manager.set_override(self.session, original)
++        for bad in (
++            {"trigger_mode": "random"},
++            {"trigger_mode": True},
++            {"trigger_mode": ["interval"]},
++            {"trigger_mode": None},
++            {"interval_prompt": 123},
++            {"interval_prompt": {}},
++            {"interval_prompt": None},
++        ):
++            with self.subTest(bad=bad), self.assertRaises(ValueError):
++                await self.manager.set_override(self.session, bad)
++            self.assertEqual(self.manager.get_override(self.session), original)
++        self.assertEqual(
++            SessionOverrideManager(self.path).get_override(self.session), original
++        )
++
++    async def test_legacy_configuration_remains_unchanged_with_idle_schema_default(
++        self,
++    ):
++        legacy = {"enable": True, "group_idle_trigger_minutes": 10}
++        await self.manager.update_session_from_effective(self.session, legacy, legacy)
++        self.assertEqual(self.manager.get_effective(self.session, legacy), legacy)
++        self.assertEqual(self.manager.get_override(self.session), {})
++        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
++        self.assertEqual(
++            schema["group_settings"]["items"]["trigger_mode"]["default"], "idle"
++        )
++
++    @unittest.skipUnless(
++        shutil.which("node"), "Node.js is required for the UI function contract"
++    )
++    def test_real_ui_session_selector_and_save_cleanup_keep_new_fields(self):
++        script = r"""
++const fs = require('node:fs');
++const assert = require('node:assert/strict');
++const source = fs.readFileSync(process.argv[1], 'utf8').replace(/\r\n/g, '\n');
++const schema = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
++const start = source.indexOf('function getSessionSchemaEntries(');
++const end = source.indexOf('\n}\n', start) + 3;
++assert.ok(start >= 0 && end > start);
++const select = new Function(
++    source.slice(start, end) + '; return getSessionSchemaEntries;'
++)();
++const groupKeys = select(schema, 'group').map(entry => entry[0]);
++assert.ok(groupKeys.includes('trigger_mode'));
++assert.ok(groupKeys.includes('interval_prompt'));
++const friendKeys = select(schema, 'friend').map(entry => entry[0]);
++assert.ok(!friendKeys.includes('trigger_mode'));
++assert.ok(!friendKeys.includes('interval_prompt'));
++const cleanStart = source.indexOf('const cleanConfig = (obj) =>');
++const cleanEnd = source.indexOf('const handleSave = async', cleanStart);
++assert.ok(cleanStart >= 0 && cleanEnd > cleanStart);
++const clean = new Function(
++    source.slice(cleanStart, cleanEnd) + '; return cleanConfig;'
++)();
++const current = {
++    trigger_mode:'interval', interval_prompt:'First line.\nSecond line.',
++    schedule_settings:{min_interval_minutes:45,max_interval_minutes:60}
++};
++assert.deepEqual(clean(current), current);
++assert.deepEqual(clean({group_settings:current}).group_settings, current);
++console.log('UI session selector and save cleanup passed');
++"""
++        result = subprocess.run(
++            [
++                shutil.which("node"),
++                "-e",
++                script,
++                str(ROOT / "admin/js/components/config/ConfigRenderer.jsx"),
++                str(ROOT / "_conf_schema.json"),
++            ],
++            capture_output=True,
++            text=True,
++            encoding="utf-8",
++            check=False,
++        )
++        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- /dev/null
++++ b/tests/test_interval_scheduling.py
+@@ -0,0 +1,319 @@
++"""Exercise interval scheduling with real timers and an isolated fake sender."""
++
++from __future__ import annotations
++
++import asyncio
++import importlib
++import time
++import unittest
++from copy import deepcopy
++from datetime import datetime
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
++
++import test_bridge_sessions as fixtures
++import test_proactive_llm as llm_fixtures
++
++flow = llm_fixtures.flow_module
++scheduler = importlib.import_module("proactive_test.core.task_scheduler")
++KEY = "test:GroupMessage:456"
++
++
++class IntervalHarness(fixtures.Harness, flow.ProactiveCoreMixin):
++    check_and_chat = flow.ProactiveCoreMixin.check_and_chat
++
++
++class IntervalSchedulingTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        await fixtures.GroupSchedulingTests.asyncSetUp(self)
++        p = self.plugin
++        p.__class__ = IntervalHarness
++        p.config["group_settings"].update(
++            trigger_mode="interval",
++            schedule_settings={
++                "min_interval_minutes": 45,
++                "max_interval_minutes": 60,
++                "quiet_hours": "",
++                "max_unanswered_times": 2,
++            },
++        )
++        p._active_chat_sessions = set()
++        p._active_chat_tasks = {}
++        p.manual_trigger_sessions = set()
++        p.context.conversation_manager = SimpleNamespace(add_message_pair=AsyncMock())
++        p._verify_message_persisted = AsyncMock(return_value=True)
++        p._prepare_llm_request = AsyncMock(return_value={
++            "conv_id": "fixture", "history": [], "system_prompt": "persona",
++        })
++        p._build_proactive_event = lambda sid: SimpleNamespace(
++            get_extra=lambda key, default=None: default,
++        )
++        p._generate_llm_response = AsyncMock(return_value=("A short reply.", "task"))
++        p._extract_response_text = lambda response: response
++        p._extract_response_chain = lambda response: []
++        self.deliveries = []
++
++        async def fake_send(sid, text, **kwargs):
++            self.deliveries.append((sid, text))
++            await p.on_after_message_sent(fixtures.event("123"))
++            return True
++
++        p._send_proactive_message = AsyncMock(side_effect=fake_send)
++        self.random = patch.object(fixtures.load("task_scheduler").random, "randint", return_value=3000)
++        self.draw = self.random.start()
++
++    async def asyncTearDown(self):
++        await fixtures.GroupSchedulingTests.asyncTearDown(self)
++        self.random.stop()
++
++    async def start(self):
++        await self.plugin._setup_auto_triggers_for_enabled_sessions()
++
++    async def fire_now(self):
++        """Let APScheduler dispatch its actual registered callback."""
++        p = self.plugin
++        job = p.scheduler.get_job(KEY)
++        self.assertIsNotNone(job)
++        completed = asyncio.get_running_loop().create_future()
++
++        def on_finished(event):
++            if event.job_id == KEY and not completed.done():
++                completed.set_result(event)
++
++        p.scheduler.add_listener(on_finished, EVENT_JOB_EXECUTED | EVENT_JOB_ERROR)
++        try:
++            p.scheduler.modify_job(KEY, next_run_time=datetime.now(p.timezone))
++            p.scheduler.resume()
++            result = await asyncio.wait_for(completed, 2)
++            self.assertIsNone(result.exception)
++        finally:
++            p.scheduler.remove_listener(on_finished)
++
++    async def test_startup_direct_interval_and_concurrent_activity_preserve_deadline(self):
++        p = self.plugin
++        await self.start()
++        deadline = p.scheduler.get_job(KEY).next_run_time
++        self.draw.assert_called_once_with(2700, 3600)
++        p.session_data[KEY]["unanswered_count"] = 1
++        await asyncio.gather(*[p.on_group_message(fixtures.event(str(i))) for i in range(10)])
++        await p.on_after_message_sent(fixtures.event("123"))
++        await p._setup_auto_trigger(KEY)
++        await p._reset_group_silence_timer(KEY)
++        self.assertEqual(p.scheduler.get_job(KEY).next_run_time, deadline)
++        self.assertEqual(len(p.scheduler.get_jobs()), 1)
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 0)
++        self.assertEqual(p.group_timers, {})
++        self.assertEqual(p.auto_trigger_timers, {})
++        self.assertEqual(self.draw.call_count, 1)
++        self.assertGreater(p.last_message_times[KEY], 0)
++
++    async def test_real_due_job_delivers_during_continuous_activity_and_reschedules(self):
++        p = self.plugin
++        self.draw.side_effect = [0.08, 3000]
++        await self.start()
++        deadline = p.scheduler.get_job(KEY).next_run_time
++        p.scheduler.resume()
++        for _ in range(35):
++            await p.on_group_message(fixtures.event("123"))
++            if not self.deliveries:
++                self.assertEqual(p.scheduler.get_job(KEY).next_run_time, deadline)
++            await asyncio.sleep(0.005)
++        self.assertEqual(len(self.deliveries), 1)
++        self.assertEqual(p._generate_llm_response.await_count, 1)
++        self.assertEqual(len(p.scheduler.get_jobs()), 1)
++        self.assertGreater(p.session_data[KEY]["next_trigger_time"], deadline.timestamp())
++        self.assertEqual(p.session_data[KEY]["schedule_trigger_mode"], "interval")
++        self.assertFalse(p.group_timers or p.auto_trigger_timers)
++
++    async def test_quiet_group_delivers_then_pauses_at_two_unanswered(self):
++        p = self.plugin
++        await self.start()
++        await self.fire_now()
++        self.assertEqual(len(self.deliveries), 1)
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 1)
++        await self.fire_now()
++        self.assertEqual(len(self.deliveries), 2)
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 2)
++        self.assertIsNone(p.scheduler.get_job(KEY))
++        self.assertNotIn("next_trigger_time", p.session_data[KEY])
++        await p.on_after_message_sent(fixtures.event("123"))
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 2)
++        self.assertIsNone(p.scheduler.get_job(KEY))
++        await p.on_group_message(fixtures.event("999"))
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 0)
++        self.assertIsNotNone(p.scheduler.get_job(KEY))
++
++    async def test_quiet_hours_skip_generation_and_retry_full_interval(self):
++        p = self.plugin
++        await self.start()
++        p.scheduler.remove_job(KEY)
++        with patch.object(flow, "is_quiet_time", return_value=True):
++            await p.check_and_chat(KEY)
++        self.assertEqual(self.deliveries, [])
++        p._generate_llm_response.assert_not_awaited()
++        self.assertIsNotNone(p.scheduler.get_job(KEY))
++        self.assertEqual(self.draw.call_count, 2)
++
++    async def test_restore_keeps_deadline_and_mode_change_replaces_old_schedule(self):
++        p = self.plugin
++        await self.start()
++        snapshot = deepcopy(p.session_data)
++        deadline = p.scheduler.get_job(KEY).next_run_time
++        p.scheduler.remove_all_jobs()
++        p.session_data = snapshot
++        await p._init_jobs_from_data()
++        await self.start()
++        self.assertEqual(p.scheduler.get_job(KEY).next_run_time, deadline)
++        self.assertEqual(self.draw.call_count, 1)
++        p.scheduler.remove_all_jobs()
++        p.session_data[KEY]["schedule_trigger_mode"] = "idle"
++        p.session_data[KEY]["next_trigger_time"] = time.time() + 6 * 3600
++        await p._init_jobs_from_data()
++        await self.start()
++        self.assertLess(p.session_data[KEY]["next_trigger_time"], time.time() + 3601)
++        self.assertEqual(self.draw.call_count, 2)
++
++    async def test_mode_change_cancels_idle_timers_and_interval_change_reseeds(self):
++        p = self.plugin
++        p.config["group_settings"]["trigger_mode"] = "idle"
++        await p._setup_auto_trigger(KEY)
++        await p._reset_group_silence_timer(KEY)
++        handles = [*p.auto_trigger_timers.values(), *p.group_timers.values()]
++        await p._schedule_next_chat_and_save(KEY)
++        p.config["group_settings"]["trigger_mode"] = "interval"
++        await self.start()
++        self.assertTrue(all(handle.cancelled() for handle in handles))
++        self.assertFalse(p.group_timers or p.auto_trigger_timers)
++        self.assertEqual(p.session_data[KEY]["schedule_trigger_mode"], "interval")
++        p.config["group_settings"]["schedule_settings"]["max_interval_minutes"] = 55
++        await p._ensure_group_interval_job(KEY)
++        self.draw.assert_called_with(2700, 3300)
++
++    async def test_due_job_dispatch_gap_does_not_start_competing_interval(self):
++        p = self.plugin
++        self.draw.return_value = 0
++        await self.start()
++        p.scheduler.remove_job(KEY)
++        await p.on_group_message(fixtures.event("123"))
++        self.assertIsNone(p.scheduler.get_job(KEY))
++        self.assertEqual(self.draw.call_count, 1)
++
++    async def test_merged_legacy_deadline_cannot_be_restored_as_interval(self):
++        p = self.plugin
++        await self.start()
++        p.scheduler.remove_all_jobs()
++        p.session_data[KEY]["next_trigger_time"] += 5 * 3600
++        await p._init_jobs_from_data()
++        await self.start()
++        self.assertLess(p.session_data[KEY]["next_trigger_time"], time.time() + 3601)
++
++    async def test_activity_during_generation_does_not_drop_delivery_or_reenter(self):
++        p = self.plugin
++        await self.start()
++        p.scheduler.remove_job(KEY)
++        p.session_data[KEY]["unanswered_count"] = 1
++        entered, release = asyncio.Event(), asyncio.Event()
++
++        async def generate(*args, **kwargs):
++            entered.set()
++            await release.wait()
++            return "Still joining the topic.", "task"
++
++        p._generate_llm_response.side_effect = generate
++        task = asyncio.create_task(p.check_and_chat(KEY))
++        await entered.wait()
++        await p.on_group_message(fixtures.event("999"))
++        await p.check_and_chat("test:GroupMessage:123_456")
++        self.assertIsNone(p.scheduler.get_job(KEY))
++        release.set()
++        await task
++        self.assertEqual(len(self.deliveries), 1)
++        self.assertEqual(p._generate_llm_response.await_count, 1)
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 1)
++        self.assertEqual(len(p.scheduler.get_jobs()), 1)
++
++    async def test_disable_during_generation_blocks_delivery_and_retry(self):
++        p = self.plugin
++        await self.start()
++        p.scheduler.remove_job(KEY)
++
++        async def generate(*args, **kwargs):
++            p.config["group_settings"]["enable"] = False
++            return "Must not send.", "task"
++
++        p._generate_llm_response.side_effect = generate
++        await p.check_and_chat(KEY)
++        self.assertEqual(self.deliveries, [])
++        self.assertEqual(p.scheduler.get_jobs(), [])
++        p.config["group_settings"]["enable"] = True
++        await self.start()
++        self.assertIsNotNone(p.scheduler.get_job(KEY))
++
++    async def test_shutdown_cancels_inflight_without_telemetry_and_no_late_retry(self):
++        p = self.plugin
++        await self.start()
++        entered = asyncio.Event()
++
++        async def generate(*args, **kwargs):
++            entered.set()
++            await asyncio.Event().wait()
++
++        p._generate_llm_response.side_effect = generate
++        task = asyncio.create_task(p.check_and_chat(KEY))
++        await entered.wait()
++        await p.terminate()
++        self.assertTrue(task.cancelled())
++        self.assertEqual(self.deliveries, [])
++        self.assertFalse(p._active_chat_sessions)
++        await p._ensure_group_interval_job(KEY)
++        self.assertEqual(p.scheduler.get_jobs(), [])
++
++    async def test_failed_delivery_retries_without_counting_or_archiving(self):
++        p = self.plugin
++        await self.start()
++        p.scheduler.remove_job(KEY)
++        p._send_proactive_message.side_effect = None
++        p._send_proactive_message.return_value = False
++        await p.check_and_chat(KEY)
++        self.assertEqual(p.session_data[KEY].get("unanswered_count", 0), 0)
++        p.context.conversation_manager.add_message_pair.assert_not_awaited()
++        self.assertEqual(len(p.scheduler.get_jobs()), 1)
++
++
++class IntervalPromptTests(unittest.IsolatedAsyncioTestCase):
++    async def test_actual_provider_request_keeps_records_and_uses_interval_prompt(self):
++        p = llm_fixtures.Harness()
++        config = {
++            "enable": True, "_session_type": "group", "trigger_mode": "interval",
++            "proactive_prompt": "OLD_IDLE_INSTRUCTION",
++            "interval_prompt": "NEW_ONE_SENTENCE_TASK {{unanswered_count}}",
++            "context_settings": {
++                "source_mode": "platform_message_history",
++                "platform_history_prompt": "OLD_ICEBREAKER {{platform_history_lines}}",
++            },
++        }
++        p._get_session_config = lambda sid: config
++        settings = p._get_context_settings(KEY)
++        context, count, _ = p._format_platform_history_as_context(
++            [{"sender_name": "Member", "sender_id": "123", "content": "TOPIC_DETAIL"}],
++            include_bot_messages=True, context_settings=settings,
++        )
++        provider = llm_fixtures.ScriptedProvider([
++            llm_fixtures.LLMResponse(role="assistant", completion_text="A short reply."),
++        ])
++        p._resolve_chat_provider = AsyncMock(return_value=provider)
++        p._dispatch_llm_request_hooks = AsyncMock(return_value=False)
++        p._dispatch_llm_response_hooks = AsyncMock(return_value=False)
++        await p._generate_llm_response(KEY, config, [], "PERSONA_RULES", 1, platform_context=context)
++        self.assertEqual(count, 1)
++        call = provider.calls[0]
++        self.assertEqual(call["prompt"], "NEW_ONE_SENTENCE_TASK 1")
++        self.assertIn("TOPIC_DETAIL", str(call["extra_user_content_parts"]))
++        self.assertNotIn("OLD_ICEBREAKER", str(call))
++        self.assertNotIn("OLD_IDLE_INSTRUCTION", str(call))
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- /dev/null
++++ b/tests/test_proactive_delivery_guard.py
+@@ -0,0 +1,199 @@
++"""Recheck proactive delivery controls without network or real messages."""
++
++# Install the isolated runtime before importing AstrBot modules.
++# ruff: noqa: E402
++
++import atexit
++import asyncio
++import importlib
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock, patch
++from zoneinfo import ZoneInfo
++
++RUNTIME = tempfile.TemporaryDirectory(prefix="proactive-delivery-test-")
++atexit.register(RUNTIME.cleanup)
++os.environ["ASTRBOT_ROOT"] = RUNTIME.name
++CORE = Path(os.environ["ASTRBOT_CORE"])
++PATCHED = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(CORE))
++package = ModuleType("proactive_delivery_test")
++package.__path__ = [str(PATCHED)]
++sys.modules[package.__name__] = package
++
++from astrbot.core.message.components import Plain
++from astrbot.core.message.message_event_result import MessageChain
++from astrbot.core.platform.platform import PlatformStatus
++from astrbot.core.platform.platform_metadata import PlatformMetadata
++
++event_module = importlib.import_module("proactive_delivery_test.core.proactive_event")
++sender_module = importlib.import_module("proactive_delivery_test.core.message_sender")
++flow_module = importlib.import_module("proactive_delivery_test.core.chat_flow")
++parser_module = importlib.import_module("proactive_delivery_test.core.session_parser")
++
++SESSION = "test:GroupMessage:456"
++
++
++class Harness(
++    sender_module.SenderMixin,
++    flow_module.ProactiveCoreMixin,
++    parser_module.SessionMixin,
++):
++    def __init__(self):
++        self._terminating = False
++        self.configured = {
++            "enable": True,
++            "schedule_settings": {"quiet_hours": ""},
++            "tts_settings": {"enable_tts": False},
++            "segmented_reply_settings": {"enable": False},
++        }
++        self.timezone = ZoneInfo("Asia/Shanghai")
++        self.session_data = {}
++        self.last_message_times = {}
++        self.telemetry = None
++        self.data_dir = RUNTIME.name
++        self.platform = SimpleNamespace(
++            meta=lambda: PlatformMetadata(
++                name="aiocqhttp", description="test", id="test"
++            ),
++            status=PlatformStatus.RUNNING,
++            send_by_session=AsyncMock(),
++        )
++        self.context = SimpleNamespace(
++            platform_manager=SimpleNamespace(get_insts=lambda: [self.platform]),
++            send_message=AsyncMock(return_value=True),
++        )
++        self._persist_proactive_message_to_platform_history = AsyncMock()
++        self._reset_group_silence_timer = AsyncMock()
++        self.event = event_module.build_proactive_event_for_session(
++            plugin=self, session_id=SESSION
++        )
++
++    def _get_session_config(self, session_id):
++        return self.configured
++
++
++class DeliveryGuardTests(unittest.IsolatedAsyncioTestCase):
++    async def test_enabled_event_delivery_retains_normal_success(self):
++        plugin = Harness()
++        self.assertTrue(await plugin.event.send(MessageChain([Plain("hello")])))
++        plugin.platform.send_by_session.assert_awaited_once()
++        self.assertTrue(plugin.event._has_send_oper)
++        self.assertEqual(len(plugin.event.proactive_sent_chains), 1)
++
++    async def test_live_disable_quiet_missing_and_termination_block_event_tools(self):
++        for reason in ["disabled", "quiet", "missing", "terminating"]:
++            with self.subTest(reason=reason):
++                plugin = Harness()
++                if reason == "disabled":
++                    plugin.configured["enable"] = False
++                elif reason == "quiet":
++                    plugin.configured["schedule_settings"]["quiet_hours"] = "0-24"
++                elif reason == "missing":
++                    plugin.configured = None
++                else:
++                    plugin._terminating = True
++                self.assertFalse(
++                    await plugin.event.send(MessageChain([Plain("blocked")]))
++                )
++                plugin.platform.send_by_session.assert_not_awaited()
++                plugin.context.send_message.assert_not_awaited()
++                self.assertFalse(plugin.event._has_send_oper)
++                self.assertTrue(plugin.event.proactive_send_failed)
++                self.assertEqual(plugin.event.proactive_sent_chains, [])
++                plugin._persist_proactive_message_to_platform_history.assert_not_awaited()
++
++    async def test_direct_and_core_fallback_paths_obey_same_controls(self):
++        plugin = Harness()
++        plugin.configured["enable"] = False
++        self.assertFalse(await plugin._send_chain(SESSION, None, [Plain("blocked")]))
++        self.assertFalse(await plugin._send_chain_direct(SESSION, [Plain("blocked")]))
++        self.assertFalse(
++            await plugin._send_chain_via_core_api(
++                SESSION, MessageChain([Plain("blocked")])
++            )
++        )
++        plugin.platform.send_by_session.assert_not_awaited()
++        plugin.context.send_message.assert_not_awaited()
++
++    async def test_disable_after_platform_error_prevents_fallback_attempt(self):
++        plugin = Harness()
++
++        async def failed_send(*args):
++            plugin.configured["enable"] = False
++            raise RuntimeError("test-only transport failure")
++
++        plugin.platform.send_by_session.side_effect = failed_send
++        self.assertFalse(await plugin.event.send(MessageChain([Plain("hello")])))
++        plugin.platform.send_by_session.assert_awaited_once()
++        plugin.context.send_message.assert_not_awaited()
++        self.assertFalse(plugin.event._has_send_oper)
++
++    async def test_disable_between_segments_stops_remaining_and_after_send_hooks(self):
++        plugin = Harness()
++        plugin.configured["segmented_reply_settings"]["enable"] = True
++        plugin._run_decorating_hooks = AsyncMock(
++            return_value=([Plain("one two")], True)
++        )
++        plugin._segment_decorated_chain = lambda *args: [Plain("one"), Plain("two")]
++        plugin._calc_interval = AsyncMock(return_value=0)
++
++        async def first_send(*args):
++            plugin.configured["enable"] = False
++
++        plugin.platform.send_by_session.side_effect = first_send
++        with patch.object(sender_module, "dispatch_event_hook", AsyncMock()) as hooks:
++            self.assertTrue(
++                await plugin._send_proactive_message(SESSION, "one two", plugin.event)
++            )
++        plugin.platform.send_by_session.assert_awaited_once()
++        self.assertEqual(len(plugin.event.proactive_sent_chains), 1)
++        hooks.assert_not_awaited()
++
++    async def test_disable_during_tts_prevents_audio_and_text_fallback(self):
++        plugin = Harness()
++        plugin.configured["tts_settings"]["enable_tts"] = True
++
++        async def audio(text):
++            plugin.configured["enable"] = False
++            return "test-only.wav"
++
++        plugin.context.get_using_tts_provider = lambda **kwargs: SimpleNamespace(
++            get_audio=audio
++        )
++        plugin._run_decorating_hooks = AsyncMock(return_value=([Plain("hello")], True))
++        with patch.object(sender_module, "dispatch_event_hook", AsyncMock()) as hooks:
++            self.assertFalse(
++                await plugin._send_proactive_message(SESSION, "hello", plugin.event)
++            )
++        plugin.platform.send_by_session.assert_not_awaited()
++        plugin.context.send_message.assert_not_awaited()
++        self.assertFalse(plugin.event._has_send_oper)
++        hooks.assert_not_awaited()
++
++    async def test_termination_while_policy_is_awaited_blocks_delivery(self):
++        plugin = Harness()
++
++        async def policy(session_id):
++            await asyncio.sleep(0)
++            plugin._terminating = True
++            return True, "allowed"
++
++        plugin._is_chat_allowed = policy
++        self.assertFalse(await plugin.event.send(MessageChain([Plain("blocked")])))
++        plugin.platform.send_by_session.assert_not_awaited()
++
++    async def test_new_group_activity_does_not_block_interval_delivery(self):
++        plugin = Harness()
++        plugin.last_message_times[SESSION] = 99999999999
++        plugin.session_data[SESSION] = {"unanswered_count": 0}
++        self.assertTrue(await plugin.event.send(MessageChain([Plain("hello")])))
++        plugin.platform.send_by_session.assert_awaited_once()
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tests/test_proactive_llm.py
++++ b/tests/test_proactive_llm.py
+@@ -115,7 +115,7 @@
+         self.timezone = ZoneInfo("Asia/Shanghai")
+ 
+     def _get_session_config(self, sid):
+-        return {}
++        return {"enable": True, "schedule_settings": {"quiet_hours": ""}}
+ 
+ 
+ def tool_response(value=1):
