@@ -53,6 +53,66 @@
     "hint": "默认 360，范围 5–1440。过期记录在下次使用或载入时清理；更久的公开事实由 LivingMemory 的 group 作用域保存。",
     "default": 360
   },
+  "video_summary_enabled": {
+    "type": "bool",
+    "description": "分析视频画面并记入本群上下文",
+    "hint": "目标群实际 @机器人并发送或引用视频时，抽取最多 6 帧生成视觉摘要。主人私聊也可用；不识别音频，不自动分析未 @的视频。需要 ffmpeg/ffprobe。会增加一次 Codex 识图调用。",
+    "default": false
+  },
+  "video_ffmpeg_path": {
+    "type": "string",
+    "description": "视频处理 ffmpeg 程序路径（可留空）",
+    "hint": "留空优先使用 AstrBot Python 目录中的 ffmpeg.exe，再查找 PATH；同目录需要 ffprobe。仅管理员配置，不接受聊天中的程序路径。",
+    "default": ""
+  },
+  "video_max_seconds": {
+    "type": "int",
+    "description": "视频最多分析前多少秒",
+    "hint": "默认 60，范围 1–60；更长视频只分析前段并注明。",
+    "default": 60
+  },
+  "video_max_mb": {
+    "type": "int",
+    "description": "视频下载大小上限（MB）",
+    "hint": "默认 50，范围 1–50；只接收当前会话中的公网视频附件，不读取任意本地文件或内网地址。",
+    "default": 50
+  },
+  "voice_enabled": {
+    "type": "bool",
+    "description": "允许按需语音回复",
+    "hint": "向模型提供 send_voice 工具，适合语音祝福、问候；普通回复仍用文字。这是朗读，不是唱歌。需先配置 TTS 提供商。",
+    "default": false
+  },
+  "voice_tts_provider_id": {
+    "type": "string",
+    "description": "按需语音使用的 TTS 提供商 ID",
+    "hint": "填写已启用的语音提供商 ID，可独立于全局自动 TTS 使用。留空跟随当前会话的 TTS 设置。",
+    "default": ""
+  },
+  "voice_max_chars": {
+    "type": "int",
+    "description": "单条语音最多字符数",
+    "hint": "默认 300，范围 40–500。Edge TTS 会把这段文字发送至微软在线语音服务，无需 API Key。",
+    "default": 300
+  },
+  "voice_cooldown_seconds": {
+    "type": "int",
+    "description": "同一群或私聊的语音间隔（秒）",
+    "hint": "默认 30，范围 5–600；同一群的成员共享冷却，一次回复最多一条语音。",
+    "default": 30
+  },
+  "image_generation_enabled": {
+    "type": "bool",
+    "description": "允许 Codex CLI 按需生图",
+    "hint": "使用当前 Codex 的 ChatGPT 登录和原生生图工具；不需 API Key。仅生成新图片，不读取参考图；专用受限进程完成后发送到当前 QQ 会话。需要支持细粒度文件权限和原生生图的 CLI，并把 AstrBot 工具调用超时设为至少 300 秒。",
+    "default": false
+  },
+  "image_generation_cooldown_seconds": {
+    "type": "int",
+    "description": "同一群或私聊的生图间隔（秒）",
+    "hint": "默认 60，范围 10–3600。一次最多一张，全实例同时只生成一张；生图会使用 Codex 账号额度。",
+    "default": 60
+  },
   "fast_mode": {
     "type": "bool",
     "description": "默认启用 Codex Fast 模式",

@@ -9,11 +9,15 @@
   },
   "core/llm_adapter.py": {
     "before": "9fe95af85bce22b2e1c19bc43a7bf65b3c90ee285ebab4c562b9a3d066d85b7c",
-    "after": "e10b7468345413b9f0901d3e61bf4c057a0e7c7aa096cb4e08e83438763b38d8"
+    "after": "b272b97ff4e74e66bffb927b65080e7358170f40663c5e8e0ff677e30f8f255a"
   },
   "core/message_sender.py": {
     "before": "82fb9d19047d9222271fe9c9d4e7f2c5c0a2f11e92e0e050a901dd348d3317bb",
-    "after": "3548698d985b227c052348b8f51c790c2b643af553a9cccb2f07ef0fdf5bb6ad"
+    "after": "87047c3d92b51c563bcf3ab99de62e61681d9b859edfa291b1a6c5118960321e"
+  },
+  "core/chat_flow.py": {
+    "before": "e52bb7eed0b63eccfc6ae9c5b6479586c5056ff4498bd66584780572facad8e8",
+    "after": "4e5e56a5fa3095ca0fe654a3372fe0384f4eaa251a99e6b0f4ecf4455441f405"
   },
   "tests/test_bridge_sessions.py": {
     "before": null,
@@ -21,6 +25,6 @@
   },
   "tests/test_proactive_llm.py": {
     "before": null,
-    "after": "c41ad9c5e672f93d244fa02a1338e3823e11c694e96a75ac0c5d096137408cd5"
+    "after": "0c69ea438c6d59849da1906bc01ea1f44bff49db536c16c076d6adb41b89c0a7"
   }
 }

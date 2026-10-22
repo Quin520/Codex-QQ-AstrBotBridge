@@ -129,6 +129,7 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 "browser_use",
                 "computer_use",
                 "view_image",
+                "image_generation",
                 "plugins",
                 "skill_search",
                 "multi_agent",

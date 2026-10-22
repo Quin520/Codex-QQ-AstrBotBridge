@@ -9,45 +9,22 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest, ProviderType
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.tool import ToolSet
-from astrbot.core.message.components import At, Plain
+from astrbot.core.message.components import At, Image, Plain
 from astrbot.core.star.command_management import list_commands, rename_command
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.star import StarMetadata
 
-from .access import PermissionCheckedTool, QQToolPolicy
+from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
 from .group_context import GroupContext, is_proactive_group
+from .image_generator import ImageGenerator
 from .integration import configure_provider
 from .profile_learning import ProfileLearner
 from .profile_reviews import ProfileReviewStore
 from .profiles import profile_instructions
 from .provider import PROVIDER_ID
 from .runner import CodexRunner
-
-
-def is_allowed(config: dict, platform: str, sender: str, group: str) -> bool:
-    """Allow the owner's private chat or members of the configured group.
-
-    Args:
-        config: Plugin configuration.
-        platform: AstrBot platform adapter name.
-        sender: Sender ID reported by the QQ adapter.
-        group: QQ group ID, or an empty string for private messages.
-
-    Returns:
-        True only for the owner's private chat or the configured group.
-    """
-    owner = str(config.get("owner_qq", "")).strip()
-    target_group = str(config.get("group_qq", "")).strip()
-    return (
-        platform == "aiocqhttp"
-        and bool(owner)
-        and bool(sender)
-        and (
-            (not group and sender == owner)
-            or bool(target_group)
-            and group == target_group
-        )
-    )
+from .video_context import VideoContext, VideoContextError, apply_summary
+from .voice import VoiceService
 
 
 class LocalCodex(Star):
@@ -55,6 +32,7 @@ class LocalCodex(Star):
         super().__init__(context)
         self.config = config
         self.tool_policy = QQToolPolicy(context, config)
+        self.voice = VoiceService(context, config)
         self.profiles = {}
         for profile in config.get("user_profiles", []):
             qq = str(profile.get("qq", "")).strip()
@@ -70,6 +48,8 @@ class LocalCodex(Star):
         self.group_context = GroupContext(
             self.config, self.data_dir / "group_context.json"
         )
+        self.video_context = VideoContext(self.config, self.data_dir)
+        self.image_generator = ImageGenerator(self.config, self.data_dir)
         self.session_file = self.data_dir / "sessions.json"
         self.sessions = (
             json.loads(self.session_file.read_text(encoding="utf-8"))
@@ -200,6 +180,20 @@ class LocalCodex(Star):
         req.system_prompt = (req.system_prompt or "") + self.group_context.instructions(
             event, proactive=proactive_group
         )
+        if self.config.get("voice_enabled", False):
+            req.system_prompt += (
+                "\n语音能力：用户要求语音祝福、说给他听或语音回复时，使用 send_voice。"
+                "普通聊天通常用文字；主动发言可以在适合的简短祝福或问候中选择语音。"
+                "send_voice 只会朗读，不会唱歌；不要把朗读歌词或播放现成歌曲说成自己唱歌。"
+                "成功发送语音后不再重复文字或等待提示；失败时如实说明。\n"
+            )
+        if self.config.get("image_generation_enabled", False):
+            req.system_prompt += (
+                "\n生图能力：用户明确要求画图或生成图片时使用 generate_image，"
+                "只生成一张新图片，不支持参考图编辑。不要把搜索图片当作生成图片。"
+                "不要读取或要求本机路径，不在普通主动发言中自行生图。"
+                "工具成功后图片已发送，不再重复确认或输出本地文件路径；失败时如实说明。\n"
+            )
         # Public tools need an explicit reviewed allowlist. Never infer computer
         # access from a message, nickname, group role, or a plugin's tool name.
         if req.func_tool:
@@ -279,8 +273,10 @@ class LocalCodex(Star):
             event: Incoming private message or group mention.
         """
         self.group_context.observe(event)
+        accepted = self._accepts_event(event)
+        if accepted and self.config.get("video_summary_enabled", False):
+            await self._prepare_video(event)
         if self.config.get("integrate_plugins", False):
-            accepted = self._accepts_event(event)
             # AstrBot 4.29 stores a suppression flag despite this method's name:
             # ProcessStage enters the default model pipeline when call_llm=False.
             event.should_call_llm(not accepted)
@@ -288,7 +284,7 @@ class LocalCodex(Star):
                 event.set_extra("selected_provider", PROVIDER_ID)
                 event.set_extra("enable_streaming", False)
             return
-        if not self._accepts_event(event):
+        if not accepted:
             return
         prompt = "".join(
             component.text
@@ -305,6 +301,23 @@ class LocalCodex(Star):
             return
         async for result in self._ask(event, prompt):
             yield result
+
+    async def _prepare_video(self, event: AstrMessageEvent) -> None:
+        """Replace authorized video attachments before the core downloads media."""
+        provider = self.context.get_provider_by_id(PROVIDER_ID)
+        try:
+            summary = await self.video_context.summarize(event, provider)
+        except VideoContextError as error:
+            apply_summary(event, None, error=str(error))
+        except Exception:  # noqa: BLE001 - Strip failed media before core fallback.
+            logger.exception("Local Codex video summary failed")
+            apply_summary(event, None, error="视频摘要生成失败，请稍后重试。")
+        else:
+            if summary:
+                apply_summary(event, summary)
+                self.group_context.observe_video_summary(
+                    event, summary.text, summary.source_qq, summary.source_name
+                )
 
     @filter.command("codex", priority=100)
     async def codex(self, event: AstrMessageEvent):
@@ -414,9 +427,42 @@ class LocalCodex(Star):
         """Keep successful public replies available to other group members."""
         self.group_context.observe_reply(event)
 
+    @filter.llm_tool(name="send_voice")
+    async def send_voice(self, event: AstrMessageEvent, text: str):
+        """Speak a short greeting or requested voice reply in the current chat.
+
+        This is text-to-speech, not singing. Successful delivery finishes the turn.
+
+        Args:
+            text(string): Short text to speak, at most 300 characters. No SSML.
+        """
+        result = await self.voice.send(event, text)
+        if spoken := event.get_extra("local_codex_voice_text"):
+            self.group_context.observe_voice_reply(event, spoken)
+            return None
+        return result
+
+    @filter.llm_tool(name="generate_image")
+    async def generate_image(self, event: AstrMessageEvent, prompt: str):
+        """Generate and deliver one new image requested by the current user.
+
+        This does not edit reference images or read files. Delivery ends the turn.
+
+        Args:
+            prompt(string): Visual description of one new image, at most 1500 characters.
+        """
+        if is_proactive_group(event):
+            return "请等待群成员明确要求生图，主动发言不自动生图。"
+        path = await self.image_generator.generate(event, prompt)
+        delivered = await event.send(event.chain_result([Image.fromFileSystem(path)]))
+        if delivered is False or getattr(event, "proactive_send_failed", False):
+            raise RuntimeError("图片已生成，但未确认发送成功。")
+        return None
+
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""
         await self.profile_learner.close()
+        await self.image_generator.stop()
         await self.runner.stop()
         if self.config.get("integrate_plugins", False):
             await self.context.provider_manager.terminate_provider(PROVIDER_ID)

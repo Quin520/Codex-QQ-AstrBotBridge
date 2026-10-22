@@ -135,7 +135,21 @@ diff --git a/core/llm_adapter.py b/core/llm_adapter.py
              logger.info("[主动消息] 调用 LLM 成功喵。")
              if self.telemetry and self.telemetry.enabled:
                  self._track_task(
-@@ -1222,16 +1275,60 @@
+@@ -1073,6 +1126,13 @@
+         if llm_response_obj is None:
+             logger.warning("[主动消息] LLM 返回空响应，重新调度喵。")
+             return None, final_user_simulation_prompt
++
++        if event is not None and event.get_extra("proactive_tool_delivered", False):
++            # Tool output has already reached the platform. This response only
++            # archives the delivered media; text decorators must not resend it.
++            return llm_response_obj, self._resolve_final_user_prompt(
++                req, final_user_simulation_prompt
++            )
+ 
+         # 后置钩子：其他插件可在此清理标记、改写文本、追加图片等。
+         response_stopped = False
+@@ -1222,16 +1282,66 @@
              return None
          return set(params.keys())
  
@@ -191,12 +205,48 @@ diff --git a/core/llm_adapter.py b/core/llm_adapter.py
 +                    and not getattr(response.result_chain, "chain", None)
 +                )
 +            ):
++                delivered_text = self._delivered_tool_text(event)
++                if delivered_text:
++                    from astrbot.api.provider import LLMResponse
++
++                    event.set_extra("proactive_tool_delivered", True)
++                    return LLMResponse(role="assistant", completion_text=delivered_text)
 +                raise RuntimeError("Proactive tool loop produced no final response.")
 +            return response
 +
          call_kwargs: dict[str, Any] = {
              "prompt": getattr(req, "prompt", None),
              "contexts": getattr(req, "contexts", None),
+@@ -1252,6 +1362,29 @@
+             }
+ 
+         return await provider.text_chat(**call_kwargs)
++
++    @staticmethod
++    def _delivered_tool_text(event: Any) -> str:
++        """Describe only media that the proactive event actually delivered."""
++        if (
++            not getattr(event, "_has_send_oper", False)
++            or getattr(event, "proactive_send_failed", False)
++            or not getattr(event, "proactive_sent_chains", None)
++        ):
++            return ""
++        from astrbot.core.message.components import Plain, Record
++
++        parts = []
++        for chain in event.proactive_sent_chains:
++            for component in chain.chain:
++                if isinstance(component, Plain):
++                    parts.append(component.text)
++                elif isinstance(component, Record):
++                    parts.append("[语音] " + str(component.text or ""))
++                else:
++                    # Never archive a provider's local path, URL or raw payload.
++                    parts.append("[已发送媒体消息]")
++        return "\n".join(parts).strip()[:2000] or "[已发送媒体消息]"
+ 
+     def _extract_response_text(self, llm_response_obj: Any) -> str:
+         """从 LLM 响应中安全提取纯文本。"""
 diff --git a/core/message_sender.py b/core/message_sender.py
 --- a/core/message_sender.py
 +++ b/core/message_sender.py
@@ -225,6 +275,83 @@ diff --git a/core/message_sender.py b/core/message_sender.py
              )
          except Exception as e:
              logger.warning(f"[主动消息] 补写平台流水失败喵: {e}", exc_info=True)
+@@ -550,6 +550,16 @@
+         if event is None:
+             event = self._build_proactive_event(session_id)
+ 
++        direct_delivery = bool(
++            event is not None and event.get_extra("proactive_tool_delivered", False)
++        )
++        if direct_delivery and (
++            not getattr(event, "_has_send_oper", False)
++            or getattr(event, "proactive_send_failed", False)
++            or not getattr(event, "proactive_sent_chains", None)
++        ):
++            return False
++
+         logger.info(
+             f"[主动消息] 开始发送 {self._get_session_log_str(session_id, session_config)} 的主动消息喵。"
+         )
+@@ -561,7 +571,7 @@
+         # 先尝试 TTS：成功后是否继续发文本由 always_send_text 控制。
+         # TTS 属于发送形态转换，不参与文本装饰，避免装饰器把语音再转成文本。
+         is_tts_sent = False
+-        if tts_conf.get("enable_tts", True) and text.strip():
++        if not direct_delivery and tts_conf.get("enable_tts", True) and text.strip():
+             try:
+                 logger.info("[主动消息] 尝试进行手动TTS喵。")
+                 tts_provider = self.context.get_using_tts_provider(umo=session_id)
+@@ -592,11 +602,13 @@
+                     )
+ 
+         # 是否继续发送文本：未发出 TTS 或配置要求始终发文本
+-        should_send_text = not is_tts_sent or tts_conf.get("always_send_text", True)
++        should_send_text = not direct_delivery and (
++            not is_tts_sent or tts_conf.get("always_send_text", True)
++        )
+ 
+         # 发送结果汇总：未送达的内容不得计入“已发送”，
+         # 否则会写入对话历史与成功遥测，污染后续上下文。
+-        any_sent = is_tts_sent
++        any_sent = direct_delivery or is_tts_sent
+ 
+         if should_send_text:
+             # 构造初始消息链。
+diff --git a/core/chat_flow.py b/core/chat_flow.py
+--- a/core/chat_flow.py
++++ b/core/chat_flow.py
+@@ -347,6 +347,10 @@
+             # 因此存档与发送都必须使用“钩子处理后”的最终形态。
+             response_text = self._extract_response_text(llm_response)
+             result_chain = self._extract_response_chain(llm_response)
++            direct_delivery = bool(
++                proactive_event is not None
++                and proactive_event.get_extra("proactive_tool_delivered", False)
++            )
+             if not response_text and not result_chain:
+                 await self._schedule_next_chat_and_save(session_id)
+                 return
+@@ -367,14 +371,18 @@
+                 < task_start_state["unanswered_count"]
+             )
+ 
+-            if has_new_message:
++            if has_new_message and not direct_delivery:
+                 logger.info(
+                     "[主动消息] 检测到用户在LLM生成期间发送了新消息，丢弃本次主动消息喵。"
+                 )
+                 return
++            if has_new_message and direct_delivery:
++                # A tool already delivered media; retain the new activity's
++                # counter reset when accounting for this completed delivery.
++                unanswered_count = current_state["unanswered_count"]
+ 
+             # 发送前再次确认终止状态：LLM 生成耗时较长，期间可能已收到终止指令。
+-            if getattr(self, "_terminating", False):
++            if getattr(self, "_terminating", False) and not direct_delivery:
+                 logger.info("[主动消息] 插件正在终止，丢弃本次已生成的主动消息喵。")
+                 return
+ 
 diff --git a/tests/test_bridge_sessions.py b/tests/test_bridge_sessions.py
 new file mode 100644
 --- /dev/null
@@ -463,10 +590,11 @@ diff --git a/tests/test_proactive_llm.py b/tests/test_proactive_llm.py
 new file mode 100644
 --- /dev/null
 +++ b/tests/test_proactive_llm.py
-@@ -0,0 +1,318 @@
+@@ -0,0 +1,453 @@
 +"""Validate proactive hooks, tool rounds and history scopes without network calls."""
 +
 +import atexit
++import asyncio
 +import importlib
 +import os
 +import sys
@@ -496,7 +624,7 @@ new file mode 100644
 +from astrbot.core.agent.message import TextPart
 +from astrbot.core.agent.tool import FunctionTool, ToolSet
 +from astrbot.core.db.po import PlatformMessageHistory
-+from astrbot.core.message.components import Plain
++from astrbot.core.message.components import Plain, Record
 +from astrbot.core.message.message_event_result import MessageChain
 +from astrbot.core.platform.platform import PlatformStatus
 +from astrbot.core.platform.platform_metadata import PlatformMetadata
@@ -508,6 +636,7 @@ new file mode 100644
 +sender_module = importlib.import_module("proactive_test.core.message_sender")
 +event_module = importlib.import_module("proactive_test.core.proactive_event")
 +parser_module = importlib.import_module("proactive_test.core.session_parser")
++flow_module = importlib.import_module("proactive_test.core.chat_flow")
 +
 +
 +class ScriptedProvider(Provider):
@@ -553,7 +682,10 @@ new file mode 100644
 +
 +
 +class Harness(
-+    parser_module.SessionMixin, llm_module.LlmMixin, sender_module.SenderMixin
++    parser_module.SessionMixin,
++    llm_module.LlmMixin,
++    sender_module.SenderMixin,
++    flow_module.ProactiveCoreMixin,
 +):
 +    def __init__(self, platform_id="test", platform_name="aiocqhttp"):
 +        self.context = Context.__new__(Context)
@@ -701,6 +833,136 @@ new file mode 100644
 +        self.assertEqual(response.completion_text, "hello")
 +        self.assertEqual(len(seen), 3)
 +        self.assertEqual(provider.calls[0]["model"], "hook-model")
++
++    def direct_platform(self, failed=False):
++        platform = SimpleNamespace(
++            meta=lambda: PlatformMetadata(
++                name="aiocqhttp", description="test", id="test"
++            ),
++            status=PlatformStatus.RUNNING,
++            send_by_session=AsyncMock(
++                side_effect=RuntimeError("fixture send failed") if failed else None
++            ),
++        )
++        self.plugin.context.platform_manager.get_insts = lambda: [platform]
++        self.plugin.context.send_message = AsyncMock(return_value=False)
++        self.event._proactive_persist_history = AsyncMock()
++        return platform
++
++    async def test_terminal_media_tool_sends_once_without_tts_or_text_ack(self):
++        platform = self.direct_platform()
++
++        async def speech(event, value):
++            await event.send(
++                MessageChain([Record(file="fixture.wav", text="Happy birthday!")])
++            )
++
++        provider = ScriptedProvider([tool_response()])
++        response = await self.plugin._invoke_provider(
++            provider, self.request(speech), self.event
++        )
++        self.assertEqual(len(provider.calls), 1)
++        self.assertTrue(self.event.get_extra("proactive_tool_delivered"))
++        self.assertEqual(response.completion_text, "[语音] Happy birthday!")
++        self.assertNotIn("fixture.wav", response.completion_text)
++        self.plugin._get_session_config = lambda sid: {
++            "enable": True,
++            "tts_settings": {"enable_tts": True, "always_send_text": True},
++        }
++        self.plugin._reset_group_silence_timer = AsyncMock()
++        self.plugin._run_decorating_hooks = AsyncMock()
++        self.plugin.context.get_using_tts_provider = lambda **kw: self.fail(
++            "A direct speech result must not synthesize a second time."
++        )
++        with patch.object(
++            sender_module, "dispatch_event_hook", AsyncMock(return_value=False)
++        ) as hook:
++            self.assertTrue(
++                await self.plugin._send_proactive_message(
++                    "test:GroupMessage:456", response.completion_text, self.event
++                )
++            )
++        platform.send_by_session.assert_awaited_once()
++        self.plugin._run_decorating_hooks.assert_not_awaited()
++        self.plugin._reset_group_silence_timer.assert_awaited_once()
++        hook.assert_awaited_once()
++
++    async def test_terminal_tool_without_delivery_is_not_a_success(self):
++        async def empty(event, value):
++            return None
++
++        with self.assertRaisesRegex(RuntimeError, "no final response"):
++            await self.plugin._invoke_provider(
++                ScriptedProvider([tool_response()]), self.request(empty), self.event
++            )
++        self.assertFalse(self.event.get_extra("proactive_tool_delivered"))
++
++    async def test_failed_terminal_delivery_is_not_a_success(self):
++        self.direct_platform(failed=True)
++
++        async def speech(event, value):
++            self.assertFalse(await event.send(MessageChain([Record(file="fake.wav")])))
++
++        with self.assertRaisesRegex(RuntimeError, "no final response"):
++            await self.plugin._invoke_provider(
++                ScriptedProvider([tool_response()]), self.request(speech), self.event
++            )
++        self.assertTrue(self.event.proactive_send_failed)
++        self.assertFalse(self.event.get_extra("proactive_tool_delivered"))
++        self.event._proactive_persist_history.assert_not_awaited()
++
++    async def test_full_flow_archives_direct_voice_and_keeps_new_activity_reset(self):
++        platform = self.direct_platform()
++        sid = "test:GroupMessage:456"
++        self.plugin.data_lock = asyncio.Lock()
++        self.plugin.manual_trigger_sessions = set()
++        self.plugin.web_admin_server = None
++        self.plugin.last_message_times = {sid: 0}
++        self.plugin.session_data[sid] = {"unanswered_count": 1}
++        self.plugin._is_chat_allowed = AsyncMock(return_value=(True, "allowed"))
++        self.plugin._get_session_config = lambda sid: {
++            "enable": True,
++            "proactive_prompt": "hello",
++            "tts_settings": {"enable_tts": True},
++        }
++        self.plugin._prepare_llm_request = AsyncMock(
++            return_value={"conv_id": "fixture", "history": [], "system_prompt": ""}
++        )
++        self.plugin._build_proactive_event = lambda sid: self.event
++        self.plugin._reset_group_silence_timer = AsyncMock()
++        self.plugin._schedule_next_chat_and_save = AsyncMock()
++        self.plugin._save_data_internal = AsyncMock()
++        self.plugin._clear_session_schedule_state = lambda sid: False
++        self.plugin._verify_message_persisted = AsyncMock(return_value=True)
++        self.plugin.context.conversation_manager = SimpleNamespace(
++            add_message_pair=AsyncMock()
++        )
++
++        async def speech(event, value):
++            await event.send(MessageChain([Record(file="fake.wav", text="hello")]))
++            # A new user message reset the counter while generation was running.
++            self.plugin.last_message_times[sid] = 1
++            self.plugin.session_data[sid]["unanswered_count"] = 0
++
++        provider = ScriptedProvider([tool_response()])
++        self.plugin._resolve_chat_provider = AsyncMock(return_value=provider)
++
++        async def prepare_tools(event, req):
++            req.func_tool = self.request(speech).func_tool
++            return False
++
++        self.plugin._dispatch_llm_request_hooks = prepare_tools
++        self.plugin._dispatch_llm_response_hooks = AsyncMock(return_value=False)
++        with patch.object(
++            sender_module, "dispatch_event_hook", AsyncMock(return_value=False)
++        ):
++            await self.plugin.check_and_chat(sid)
++        self.assertEqual(len(provider.calls), 1)
++        platform.send_by_session.assert_awaited_once()
++        self.plugin._dispatch_llm_response_hooks.assert_not_awaited()
++        self.plugin._schedule_next_chat_and_save.assert_not_awaited()
++        self.plugin.context.conversation_manager.add_message_pair.assert_awaited_once()
++        self.assertEqual(self.plugin.session_data[sid]["unanswered_count"], 1)
 +
 +
 +class HistoryScopeTests(unittest.IsolatedAsyncioTestCase):

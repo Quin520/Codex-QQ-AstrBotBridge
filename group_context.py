@@ -143,6 +143,60 @@ class GroupContext:
         self._save()
         event.set_extra("local_codex_group_reply", text)
 
+    def observe_voice_reply(self, event: AstrMessageEvent, text: str) -> None:
+        """Remember only speech whose controlled sender confirmed delivery."""
+        scope = self._scope(event)
+        if (
+            not scope
+            or not text
+            or text != event.get_extra("local_codex_voice_text")
+            or event.get_extra("local_codex_voice_remembered")
+        ):
+            return
+        self.rows.append(
+            {
+                "id": uuid.uuid4().hex,
+                "scope": scope,
+                "time": time.time(),
+                "role": "assistant",
+                "qq": str(event.get_self_id()),
+                "name": "机器人",
+                "reply_to": ""
+                if is_proactive_group(event)
+                else str(event.get_sender_id()),
+                "text": "[已发送语音的文字内容] " + text[:760],
+            }
+        )
+        self._save()
+        event.set_extra("local_codex_voice_remembered", True)
+
+    def observe_video_summary(
+        self, event: AstrMessageEvent, text: str, source_qq: str, source_name: str
+    ) -> None:
+        """Keep a visual interpretation attributed to the verified attachment author."""
+        scope = self._scope(event)
+        if (
+            not scope
+            or not text
+            or not source_qq
+            or event.get_extra("local_codex_video_row")
+        ):
+            return
+        row_id = uuid.uuid4().hex
+        self.rows.append(
+            {
+                "id": row_id,
+                "scope": scope,
+                "time": time.time(),
+                "role": "user",
+                "qq": str(source_qq),
+                "name": str(source_name)[:80],
+                "text": "[此成员所发视频的抽帧摘要，非口述，未识别音频] " + text[:730],
+            }
+        )
+        self._save()
+        event.set_extra("local_codex_video_row", row_id)
+
     def instructions(self, event: AstrMessageEvent, proactive: bool = False) -> str:
         """Render only this platform instance's group, retaining current identity."""
         scope = self._scope(event)

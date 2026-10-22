@@ -59,6 +59,7 @@ class CodexRunner:
         *,
         workspace: Path | None = None,
         web_search: bool = False,
+        image_generation: bool = False,
     ):
         self.executable = executable
         self.data_dir = data_dir
@@ -69,6 +70,7 @@ class CodexRunner:
             raise ValueError("Reasoning effort must be low, medium, high, or xhigh.")
         self.reasoning_effort = reasoning_effort
         self.web_search = web_search
+        self.image_generation = image_generation
         self.workspace = workspace or data_dir / "workspace"
         self.process = None
 
@@ -117,6 +119,12 @@ class CodexRunner:
         """
         if not self.executable.is_file() or self.executable.suffix.lower() != ".exe":
             raise RuntimeError("Configure the absolute path to the native codex.exe.")
+        if self.image_generation and (
+            thread_id or images or output_schema or not ephemeral or self.web_search
+        ):
+            raise ValueError(
+                "Image generation requires a new, text-only ephemeral turn."
+            )
         if thread_id:
             uuid.UUID(thread_id)
         workspace = self.workspace
@@ -167,12 +175,13 @@ class CodexRunner:
         ):
             args.extend(["--disable", feature])
         args.extend(
+            ["--enable" if self.image_generation else "--disable", "image_generation"]
+        )
+        args.extend(
             [
                 "exec",
                 "--ignore-user-config",
                 "--skip-git-repo-check",
-                "--sandbox",
-                "read-only",
                 "--json",
                 "--color",
                 "never",
@@ -180,6 +189,23 @@ class CodexRunner:
                 str(workspace),
             ]
         )
+        if self.image_generation:
+            # Unlike read-only sandbox mode, this denies reads outside the empty
+            # task workspace, including native image-gen reference-image reads.
+            # An unsupported Windows sandbox must fail closed, not run unsandboxed.
+            args.extend(["--strict-config", "--ignore-rules"])
+            for setting in (
+                'default_permissions="qq_image_generation"',
+                'permissions.qq_image_generation.filesystem={":workspace_roots"="read"}',
+                "permissions.qq_image_generation.network.enabled=false",
+                "project_doc_max_bytes=0",
+                "features.skip_host_skill_discovery=true",
+                "features.hooks=false",
+                "features.memories=false",
+            ):
+                args.extend(["-c", setting])
+        else:
+            args.extend(["--sandbox", "read-only"])
         if self.model:
             args.extend(["--model", self.model])
         args.extend(

@@ -5,10 +5,27 @@ from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
 
 PUBLIC_PLUGIN_TOOLS = {
+    "astrbot_plugin_local_codex": {"send_voice", "generate_image"},
     "astrbot_plugin_listen_music": {"find_music", "deliver_music", "search_music"},
     "astrbot_plugin_livingmemory": {"recall_long_term_memory"},
     "meme_manager": {"search_memes"},
 }
+
+
+def is_allowed(config: dict, platform: str, sender: str, group: str) -> bool:
+    """Allow the owner's private chat or members of the configured QQ group."""
+    owner = str(config.get("owner_qq", "")).strip()
+    target_group = str(config.get("group_qq", "")).strip()
+    return (
+        platform == "aiocqhttp"
+        and bool(owner)
+        and bool(sender)
+        and (
+            (not group and sender == owner)
+            or bool(target_group)
+            and group == target_group
+        )
+    )
 
 
 class QQToolPolicy:
@@ -45,6 +62,13 @@ class QQToolPolicy:
             if module != root and not module.startswith(root + "."):
                 continue
             plugin = root.rsplit(".", 1)[-1]
+            if plugin == "astrbot_plugin_local_codex":
+                switch = {
+                    "send_voice": "voice_enabled",
+                    "generate_image": "image_generation_enabled",
+                }.get(tool.name)
+                if switch and not self.config.get(switch, False):
+                    return False
             return owner_private or tool.name in PUBLIC_PLUGIN_TOOLS.get(plugin, set())
         return False
 
