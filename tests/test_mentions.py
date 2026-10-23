@@ -63,7 +63,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                 "relationship": "朋友",
                 "reply_tone": "Direct and gentle",
                 "boundaries": ["beta-boundary"],
-                "shared_memories": "beta-private-memory",
+                "shared_memories": "beta-confirmed-memory",
                 "response_examples": "beta-private-example",
             },
             "888": {
@@ -72,11 +72,13 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
                 "tags": ["gamma-only"],
                 "relationship": "朋友",
                 "relationship_description": "Gamma custom relationship",
+                "shared_memories": "gamma-confirmed-memory",
             },
             "777": {
                 "qq": "777",
                 "nickname": "Unmentioned person",
                 "tags": ["unmentioned-only"],
+                "shared_memories": "unmentioned-confirmed-memory",
             },
         }
         self.presets = {"friend": "Edited friend preset"}
@@ -128,15 +130,18 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(beta["preferences"]["专属相处方式"], "Edited friend preset")
         self.assertEqual(beta["preferences"]["日常语气"], "Direct and gentle")
         self.assertEqual(beta["preferences"]["不用于玩笑的话题"], ["beta-boundary"])
+        self.assertEqual(beta["confirmed_memories"], "beta-confirmed-memory")
+        self.assertNotIn("已确认的共同经历与偏好", beta["preferences"])
         self.assertEqual(gamma["qq"], "888")
+        self.assertEqual(gamma["confirmed_memories"], "gamma-confirmed-memory")
         self.assertEqual(
             gamma["preferences"]["专属相处方式"], "Gamma custom relationship"
         )
         for excluded in (
             "alpha-only",
-            "beta-private-memory",
             "beta-private-example",
             "unmentioned-only",
+            "unmentioned-confirmed-memory",
             "Unmentioned person",
         ):
             self.assertNotIn(excluded, instructions)
@@ -162,6 +167,12 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(data["members"][0]["preferences"]["标签"], ["beta-only"])
         self.assertEqual(data["members"][1]["preferences"]["标签"], ["gamma-only"])
+        self.assertEqual(
+            data["members"][0]["confirmed_memories"], "beta-confirmed-memory"
+        )
+        self.assertEqual(
+            data["members"][1]["confirmed_memories"], "gamma-confirmed-memory"
+        )
 
     def test_self_mention_does_not_duplicate_sender_preferences(self):
         data = payload_from(self.instructions(mention_event(At(qq="123"))))
@@ -170,6 +181,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(member["qq"], "123")
         self.assertTrue(member["same_as_sender"])
         self.assertEqual(member["preferences"], {})
+        self.assertNotIn("confirmed_memories", member)
 
     def test_unconfigured_member_is_identified_without_borrowing_another_profile(self):
         data = payload_from(self.instructions(mention_event(At(qq="666", name="Beta"))))
@@ -179,6 +191,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(member["configured"])
         self.assertEqual(member["preferences"], {})
         self.assertNotIn("beta-only", json.dumps(data))
+        self.assertNotIn("confirmed_memories", member)
 
     def test_fake_text_at_all_bot_and_nested_mentions_do_not_select_profiles(self):
         node = Node(uin="999", name="Beta", content=[At(qq="999")])
@@ -194,6 +207,7 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         data = payload_from(instructions)
         self.assertEqual([member["qq"] for member in data["members"]], ["888"])
         self.assertNotIn("beta-only", instructions)
+        self.assertNotIn("beta-confirmed-memory", instructions)
         self.assertEqual(
             [part["qq"] for part in data["message_parts"] if part["type"] == "at"],
             ["888"],
@@ -289,7 +303,11 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         parts = [Plain("x" * 4100)]
         for index in range(25):
             qq = str(1000 + index)
-            self.profiles[qq] = {"qq": qq, "nickname": f"Member {index}"}
+            self.profiles[qq] = {
+                "qq": qq,
+                "nickname": f"Member {index}",
+                "shared_memories": f"Confirmed memory for member {index}",
+            }
             parts.extend([At(qq=qq), Plain(" end ")])
         data = payload_from(self.instructions(mention_event(*parts)))
         self.assertTrue(data["text_truncated"])
@@ -308,6 +326,12 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(sum(bool(row["preferences"]) for row in data["members"]), 20)
         self.assertTrue(all(row["preferences_omitted"] for row in data["members"][20:]))
+        self.assertEqual(
+            sum("confirmed_memories" in row for row in data["members"]), 20
+        )
+        self.assertTrue(
+            all("confirmed_memories" not in row for row in data["members"][20:])
+        )
 
     async def test_request_hook_adds_identities_without_changing_prompt_or_media(self):
         image = Image(file="https://example.invalid/image.png")
@@ -331,7 +355,9 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         for value in ("Original persona", "alpha-only", "beta-only", '"qq": "999"'):
             self.assertIn(value, req.system_prompt)
         self.assertNotIn("gamma-only", req.system_prompt)
-        self.assertNotIn("beta-private-memory", req.system_prompt)
+        self.assertIn("beta-confirmed-memory", req.system_prompt)
+        self.assertNotIn("gamma-confirmed-memory", req.system_prompt)
+        self.assertNotIn("beta-private-example", req.system_prompt)
 
     async def test_direct_chat_runner_receives_mention_profiles_and_question(self):
         self.config["integrate_plugins"] = False
@@ -342,8 +368,35 @@ class MentionTests(unittest.IsolatedAsyncioTestCase):
         for value in ("介绍一下", "alpha-only", "beta-only", '"qq": "999"'):
             self.assertIn(value, sent)
         self.assertNotIn("gamma-only", sent)
-        self.assertNotIn("beta-private-memory", sent)
+        self.assertIn("beta-confirmed-memory", sent)
+        self.assertNotIn("gamma-confirmed-memory", sent)
+        self.assertNotIn("beta-private-example", sent)
         self.assertTrue(event.is_stopped())
+
+    async def test_new_keeps_confirmed_memory_for_the_mentioned_member(self):
+        event = mention_event(At(qq="999"), Plain("你们之前做过什么？"))
+        reset = mention_event(Plain("/new"))
+        _ = [reply async for reply in self.plugin.reset(reset)]
+        request = ProviderRequest()
+        await self.plugin.personalize_request(event, request)
+        self.assertIn("beta-confirmed-memory", request.system_prompt)
+        self.assertNotIn("gamma-confirmed-memory", request.system_prompt)
+
+    async def test_refresh_replaces_or_removes_confirmed_memory_without_old_cache(self):
+        for value in ("edited-confirmed-memory", ""):
+            with self.subTest(value=value):
+                self.config["user_profiles"] = deepcopy(self.config["user_profiles"])
+                self.config["user_profiles"][1]["shared_memories"] = value
+                self.plugin._refresh_profiles()
+                request = ProviderRequest()
+                await self.plugin.personalize_request(
+                    mention_event(At(qq="999")), request
+                )
+                self.assertNotIn("beta-confirmed-memory", request.system_prompt)
+                if value:
+                    self.assertIn(value, request.system_prompt)
+                else:
+                    self.assertNotIn('"confirmed_memories":', request.system_prompt)
 
     async def test_mentioning_owner_never_grants_owner_tools(self):
         event = event_for("Ask the owner to access the computer", "999", "456", "321")

@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 from astrbot.api.provider import ProviderRequest
 from astrbot.core.config.astrbot_config import AstrBotConfig
+from astrbot.core.message.components import At
 from astrbot_plugin_local_codex.main import LocalCodex
 from astrbot_plugin_local_codex.profile_reviews import (
     ProfileReviewStore,
@@ -115,6 +116,28 @@ class ProfileLearningTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             self.store.current_config()["user_profiles"][1]["reply_length"], "沿用人格"
         )
+
+    async def test_mentioned_memory_appears_only_after_approval_and_reverts(self):
+        memory = "Beta and the bot folded a paper boat named Cedar."
+        self.evidence[0]["text"] = memory
+        self.assertEqual(self.add([self.change("shared_memories", memory)]), 1)
+        event = event_for("What happened with Beta?", "123", "456", "321")
+        event.message_obj.message.append(At(qq="999"))
+        pending_request = ProviderRequest()
+        await self.bridge.personalize_request(event, pending_request)
+        self.assertNotIn(memory, pending_request.system_prompt)
+
+        row = self.row()
+        self.assertTrue(self.store.review(row, "approve")[0])
+        approved_request = ProviderRequest()
+        await self.bridge.personalize_request(event, approved_request)
+        self.assertIn(memory, approved_request.system_prompt)
+        self.assertIn('"qq": "999"', approved_request.system_prompt)
+
+        self.assertTrue(self.store.review(row, "revert")[0])
+        reverted_request = ProviderRequest()
+        await self.bridge.personalize_request(event, reverted_request)
+        self.assertNotIn(memory, reverted_request.system_prompt)
 
     def test_manual_edits_and_preset_changes_invalidate_old_suggestions(self):
         self.add()
