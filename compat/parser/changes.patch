@@ -1,0 +1,36 @@
+--- a/core/sender.py
++++ b/core/sender.py
+@@ -342,4 +342,33 @@
+             except Exception as e:
+                 seg_meta = self._collect_seg_meta(segs)
+                 logger.error(f"发送解析结果失败： error={e}, segments={seg_meta}")
++                return
++        self._remember_delivered_result(event, result)
++
++    def _remember_delivered_result(self, event: AstrMessageEvent, result: ParseResult) -> None:
++        """Publish parsed public text to the active bridge after successful delivery."""
++        bridge = self.cfg.context.get_registered_star("astrbot_plugin_local_codex")
++        if not bridge or not bridge.activated or not bridge.star_cls:
+             return
++        observer = getattr(bridge.star_cls, "observe_parsed_link", None)
++        if observer is None:
++            return
++        parts = []
++        for item in (result, result.repost):
++            if item is None:
++                continue
++            for value in (item.header, item.text, item.extra.get("info")):
++                if value and str(value).strip() not in parts:
++                    parts.append(str(value).strip())
++            for content in item.contents:
++                if isinstance(content, TextContent) and content.text:
++                    text = str(content.text).strip()
++                    if text and text not in parts:
++                        parts.append(text)
++        try:
++            observer(event, {
++                "resource_id": result.get_resource_id(), "url": result.url,
++                "platform": result.platform.display_name, "text": "\n".join(parts)[:1800],
++            })
++        except Exception:
++            logger.exception("Parser result was delivered but shared context could not be saved")

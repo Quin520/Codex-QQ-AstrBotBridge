@@ -66,6 +66,29 @@ python -m unittest discover -s tests -p test_bridge_natural_style.py -v
 
 测试需要同级安装的主动消息插件和本机 Codex 桥，也可用 `PROACTIVE_PLUGIN_DIR`、`CODEX_BRIDGE_PLUGIN_DIR` 指定目录。两组共 14 项测试使用真实事件类、实际上下文处理代码、虚构成员和隔离目录，覆盖群身份、授权范围、插件开关、缓存切换及后台 JSON 学习；不调用真实模型、不读取真实聊天、不发送 QQ 消息。新增兼容源码和测试随 `dialogue-context.patch` 完整提供，同样遵循下述 AGPL-3.0 许可。
 
+## v0.3.18 全部学习审批增量补丁
+
+`approval-gate.patch` 基于以上两个补丁均已应用的自学习 **4.3.1**。应用前核对 `approval-gate-baseline.json`，备份源码、前端、配置和 `data/plugin_data/astrbot_plugin_self_learning/messages.db`；备份 SQLite 数据库时应停止 AstrBot 或使用 SQLite 的在线备份接口，不能直接复制正在写入的主文件。
+
+在停止 AstrBot 后，于自学习插件目录执行：
+
+```powershell
+git -c core.autocrlf=false apply --check 'D:\Plugins\astrbot_plugin_local_codex\compat\self_learning\approval-gate.patch'
+git -c core.autocrlf=false apply 'D:\Plugins\astrbot_plugin_local_codex\compat\self_learning\approval-gate.patch'
+```
+
+随后按上节重新构建 `web_src`，在自学习配置的高级设置中开启“学习变化全部先审批”，再启动 AstrBot。公开默认关闭，原始消息采集和临时群上下文仍正常工作。
+
+- **好感度**：每次非零变化先生成带有聊天依据、旧值和建议值的审批项。批准才更新数值并记录历史；拒绝不改变数值。重复点击不会重复应用，旧值或上限变更会阻止过期建议，也不会自动扣减其他成员。旧版缺失的变化历史无法补造。
+- **表达和人格**：学习批次、表达提炼、记住表达命令、临时风格及情绪引起的人格修改均先入队。表达批准后进入对应群、人格和成员的表达库，不追加到全局人格的示范对话中。
+- **黑话**：模型推断和联网补充只生成候选，不因重复出现或推断成功自动变成可用黑话；已有人工审查入口保持可用。
+- **旧数据**：首次开启以事务把没有匹配批准记录的旧表达移回待审队列，每组最多十条，保留全部候选和已有审核结果。现有好感度与已审核黑话保留。若旧表达存在生成历史外键引用，会明确报错并回滚，需按实际数据库适配迁移，不能删除历史强行启动。
+- **管理页面**：审查队列增加审批状态、好感度待审及处理历史、当前数值和实际变化明细，表达和人格列表不再仅取前几项。批次状态会正确显示完成或失败；学习的时间、消息数及证据门槛仍有效。
+
+现有桥接成员设置审批继续使用原流程。LivingMemory 的事实记忆、原始聊天和临时上下文不属于此开关；不要把“全部学习审批”理解为所有插件数据库写入都需要审批。管理页免密时，审批操作和好感度依据仅允许本机回环访问；启用密码后沿用现有登录认证。
+
+验证使用隔离 SQLite、真实审批 API 和虚构聊天，覆盖批准、拒绝、重复操作、过期建议、事务回滚、旧数据迁移及作用域保留；前端验证批准确认与取消操作。测试不发送 QQ 消息。回退应在停止 AstrBot 后恢复同一时点的源码、构建产物、配置及数据库备份，避免只回退源码却留下不匹配的数据状态。
+
 ## 许可与来源
 
 补丁中的自学习插件衍生部分遵循上游 AGPL-3.0，完整协议见 [AGPL-3.0.txt](AGPL-3.0.txt)。上游作者和版权声明保留。此兼容修改由 Quin520 的 Codex-QQ-AstrBotBridge 提供；其源码就是本目录补丁以及桥接的 `profile_learning.py` / `profile_reviews.py`。未重新发布上游完整包或二进制依赖。

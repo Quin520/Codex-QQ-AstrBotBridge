@@ -485,6 +485,10 @@ class LocalCodex(Star):
         """Keep successful public replies available to other group members."""
         self.group_context.observe_reply(event)
 
+    def observe_parsed_link(self, event: AstrMessageEvent, payload: dict) -> None:
+        """Receive public parser metadata only after its sender confirms delivery."""
+        self.group_context.observe_parsed_link(event, payload)
+
     @filter.llm_tool(name="send_voice")
     async def send_voice(self, event: AstrMessageEvent, text: str):
         """Speak a short greeting or requested voice reply in the current chat.

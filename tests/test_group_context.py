@@ -102,6 +102,31 @@ class GroupContextTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("上个人明天做什么？", request.system_prompt)
         self.assertNotEqual(first.unified_msg_origin, second.unified_msg_origin)
 
+    async def test_parser_result_is_shared_attributed_bounded_and_deduplicated(self):
+        event = group_event("https://www.bilibili.com/video/example", "999", name="Beta")
+        event.message_obj.message_id = "parser-42"
+        self.plugin.observe_parsed_link(event, {
+            "resource_id": "fixture-video", "platform": "哔哩哔哩",
+            "url": "https://www.bilibili.com/video/example?token=secret#fragment",
+            "text": "标题：纸船试验\n平台摘要：蓝色纸船漂了十米。",
+        })
+        self.plugin.observe_parsed_link(event, {"resource_id": "fixture-video", "text": "duplicate"})
+        rows = context_rows(self.memory.instructions(group_event("刚才的视频讲什么？", "123")))
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["qq"], "999")
+        self.assertEqual(rows[0]["source_kind"], "parsed_link")
+        self.assertIn("纸船漂了十米", rows[0]["text"])
+        self.assertEqual(rows[0]["source_url"], "https://www.bilibili.com/video/example")
+        self.assertNotIn("secret", json.dumps(rows))
+        self.assertEqual(context_rows(self.memory.instructions(group_event("other", group="777"))), [])
+
+    async def test_parser_private_and_other_group_results_are_not_shared(self):
+        for group in ("", "777"):
+            self.plugin.observe_parsed_link(group_event("private", group=group), {
+                "resource_id": "private", "text": "private material",
+            })
+        self.assertEqual(self.memory.rows, [])
+
     async def test_unmentioned_group_message_is_observed_without_model_or_reply(self):
         event = group_event("环境上下文。", "999", name="Beta")
         replies = [item async for item in self.plugin.chat(event)]
