@@ -23,4 +23,17 @@ $env:PARSER_PLUGIN_DIR = 'D:\AstrBot\core\data\plugins\astrbot_plugin_parser'
 python 'D:\Plugins\astrbot_plugin_local_codex\compat\parser\test_delivery.py'
 ```
 
+## 小黑盒验证码响应增量
+
+桥接 v0.3.19 配套 `verification-preview.patch`，在上述 `changes.patch` 已应用的解析器 1.5.7 上追加。应用前核对 `verification-preview-baseline.json` 并备份；停止 AstrBot 后在解析插件目录执行：
+
+```powershell
+git -c core.autocrlf=false apply --check 'D:\Plugins\astrbot_plugin_local_codex\compat\parser\verification-preview.patch'
+git -c core.autocrlf=false apply 'D:\Plugins\astrbot_plugin_local_codex\compat\parser\verification-preview.patch'
+```
+
+网站返回 `show_captcha` 时，正文解析会明确失败。补丁仅读取本条 QQ 卡片中与选中链接对应的标题、简介，标注“未取得全文”，通过原发送流程回传并记录群上下文；不额外下载图片或视频，不自动完成验证码。原卡片没有可用文字时仅说明无法获取正文，正常解析成功时仍使用真实正文。其他异常继续保留原来的错误语义。
+
+更新后重启 AstrBot，NapCat 保持运行，再分享链接测试。旧卡片不会自动重播。使用 AstrBot Python 环境、设置好 `PYTHONPATH` 后，在解析插件目录运行 `python tests/test_verification_preview.py`；桥接默认从同级插件目录加载，也可通过 `CODEX_BRIDGE_PLUGIN_DIR` 指定。八项测试使用虚构卡片与假发送，不调用 QQ 或外部网站。
+
 衍生补丁沿用上游 MIT 许可，保留 Les Freire 的版权声明，见 [LICENSE](LICENSE)。本目录不包含用户配置、平台登录信息或聊天内容。

@@ -1,0 +1,367 @@
+--- a/core/exception.py
++++ b/core/exception.py
+@@ -10,6 +10,14 @@
+     """提示异常"""
+ 
+     pass
++
++
++class VerificationRequiredException(ParseException):
++    """Report a site's verification challenge without attempting to bypass it."""
++
++    def __init__(self, message: str, source_url: str):
++        super().__init__(message)
++        self.source_url = source_url
+ 
+ 
+ class DownloadException(ParseException):
+--- a/core/parsers/xiaoheihe.py
++++ b/core/parsers/xiaoheihe.py
+@@ -13,7 +13,7 @@
+ from ..config import PluginConfig
+ from ..data import MediaContent, Platform, SendGroup, TextContent, VideoContent
+ from ..download import Downloader
+-from ..exception import ParseException
++from ..exception import ParseException, VerificationRequiredException
+ from .base import BaseParser, handle
+ 
+ V4_EP = (
+@@ -384,6 +384,11 @@
+             headers=self.headers,
+         )
+         status = payload.get("status")
++        if status == "show_captcha":
++            raise VerificationRequiredException(
++                "小黑盒要求验证码，暂时无法获取正文。",
++                f"https://www.xiaoheihe.cn/app/bbs/link/{link_id}",
++            )
+         if status != "ok":
+             raise ParseException(f"小黑盒 link/tree 请求失败: {status}")
+         result = payload.get("result")
+--- a/core/utils.py
++++ b/core/utils.py
+@@ -226,6 +226,42 @@
+ 
+ def _clean_embedded_url(value: str) -> str:
+     return unquote(value.strip().replace("\\/", "/"))
++
++
++def extract_json_preview(data: dict | str, matched_link: str) -> str | None:
++    """Read the supplied card preview only when it belongs to the matched link.
++
++    Args:
++        data: The platform-supplied JSON card, not a fetched webpage.
++        matched_link: The exact URL fragment selected by the parser handler.
++
++    Returns:
++        A bounded title/description preview, or None for an unrelated/empty card.
++    """
++    if isinstance(data, str):
++        try:
++            data = json.loads(data)
++        except (ValueError, TypeError):
++            return None
++    if not isinstance(data, dict) or not matched_link:
++        return None
++    meta = data.get("meta")
++    if not isinstance(meta, dict):
++        return None
++    for key in ("news", "detail_1"):
++        node = meta.get(key)
++        if not isinstance(node, dict):
++            continue
++        url = extract_json_url({"meta": {key: node}})
++        if not url or matched_link not in url:
++            continue
++        parts = []
++        for field in ("title", "desc"):
++            value = node.get(field)
++            if isinstance(value, str) and value.strip() and value.strip() not in parts:
++                parts.append(value.strip())
++        return "\n".join(parts)[:1200] or None
++    return None
+ 
+ 
+ def extract_json_url(data: dict | str) -> str | None:
+--- a/main.py
++++ b/main.py
+@@ -19,10 +19,11 @@
+ from .core.config import PluginConfig
+ from .core.debounce import Debouncer
+ from .core.download import Downloader
++from .core.exception import VerificationRequiredException
+ from .core.parsers import BaseParser, BilibiliParser
+ from .core.render import Renderer
+ from .core.sender import MessageSender
+-from .core.utils import extract_json_url
++from .core.utils import extract_json_preview, extract_json_url
+ 
+ 
+ class ParserPlugin(Star):
+@@ -151,6 +152,7 @@
+             return
+ 
+         # 卡片解析：扫描整条消息链，兼容 @ + JSON 卡片等组合消息。
++        cards = []
+         for seg in chain:
+             if not isinstance(seg, Json):
+                 continue
+@@ -158,17 +160,21 @@
+             logger.debug(f"解析Json组件: {parsed_url}")
+             if parsed_url:
+                 text = parsed_url
++                cards.append(seg.data)
+                 break
+ 
+         # 引用解析
+         reply_seg = next((seg for seg in chain if isinstance(seg, Reply)), None)
+         if self.cfg.enable_reply_parse and reply_seg and reply_seg.chain:
+             reply_texts = []
++            cards = []
+             for seg in reply_seg.chain:
+                 if isinstance(seg, Plain):
+                     reply_texts.append(seg.text)
+                 elif isinstance(seg, Json):
+-                    reply_texts.append(extract_json_url(seg.data))
++                    if reply_url := extract_json_url(seg.data):
++                        reply_texts.append(reply_url)
++                        cards.append(seg.data)
+             if reply_texts:
+                 text = "".join(reply_texts)
+ 
+@@ -214,7 +220,32 @@
+             return
+ 
+         # 解析
+-        parse_res = await self.parser_map[keyword].parse(keyword, searched)
++        parser = self.parser_map[keyword]
++        try:
++            parse_res = await parser.parse(keyword, searched)
++        except VerificationRequiredException as exc:
++            logger.warning(
++                "Parser requires site verification; full content is unavailable"
++            )
++            preview = next(
++                (
++                    value
++                    for card in cards
++                    if (value := extract_json_preview(card, link))
++                ),
++                None,
++            )
++            if not preview:
++                await event.send(event.chain_result([Plain(exc.message)]))
++                return
++            parse_res = parser.result(
++                text=f"{exc.message}\n以下仅为 QQ 分享卡片的标题和简介（未取得全文）：\n{preview}",
++                url=exc.source_url,
++                extra={
++                    "source_kind": "share_card_preview",
++                    "full_content_available": False,
++                },
++            )
+ 
+         # 基于资源ID防抖
+         resource_id = parse_res.get_resource_id()
+--- /dev/null
++++ b/tests/test_verification_preview.py
+@@ -0,0 +1,199 @@
++"""Exercise real parser handling and shared context with fictional cards and fake sends."""
++
++import importlib
++import json
++import os
++from pathlib import Path
++import sys
++import tempfile
++from types import ModuleType, SimpleNamespace
++import unittest
++from unittest.mock import AsyncMock, Mock
++
++PLUGIN = Path(__file__).resolve().parents[1]
++package = ModuleType("parser_verification_test")
++package.__path__ = [str(PLUGIN)]
++sys.modules[package.__name__] = package
++main_module = importlib.import_module("parser_verification_test.main")
++data_module = importlib.import_module("parser_verification_test.core.data")
++error_module = importlib.import_module("parser_verification_test.core.exception")
++sender_module = importlib.import_module("parser_verification_test.core.sender")
++utils = importlib.import_module("parser_verification_test.core.utils")
++xiaoheihe = importlib.import_module("parser_verification_test.core.parsers.xiaoheihe")
++bridge = ModuleType("bridge_verification_test")
++bridge.__path__ = [
++    os.environ.get(
++        "CODEX_BRIDGE_PLUGIN_DIR", str(PLUGIN.parent / "astrbot_plugin_local_codex")
++    )
++]
++sys.modules[bridge.__name__] = bridge
++GroupContext = importlib.import_module(
++    "bridge_verification_test.group_context"
++).GroupContext
++
++from astrbot.core.message.components import Json, Plain
++from astrbot.core.platform.message_type import MessageType
++from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
++    AiocqhttpMessageEvent,
++)
++
++URL = "https://api.xiaoheihe.cn/v3/bbs/app/api/web/share?link_id=111&h_src=fictional"
++CANONICAL = "https://www.xiaoheihe.cn/app/bbs/link/111"
++
++
++def card():
++    return {
++        "app": "com.tencent.tuwen.lua",
++        "meta": {
++            "news": {
++                "jumpUrl": URL,
++                "title": "纸船实验",
++                "desc": "蓝色纸船漂了十米",
++                "tag": "小黑盒",
++            }
++        },
++    }
++
++
++class VerificationPreviewTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.addCleanup(self.temp.cleanup)
++        self.memory = GroupContext(
++            {"owner_qq": "123", "group_qq": "456", "group_context_enabled": True},
++            Path(self.temp.name) / "context.json",
++        )
++        context = SimpleNamespace(
++            get_registered_star=Mock(
++                return_value=SimpleNamespace(
++                    activated=True,
++                    star_cls=SimpleNamespace(
++                        observe_parsed_link=self.memory.observe_parsed_link
++                    ),
++                )
++            )
++        )
++        self.cfg = SimpleNamespace(
++            whitelist=[],
++            blacklist=[],
++            require_at_in_group=True,
++            enable_reply_parse=False,
++            single_heavy_render_card=False,
++            forward_threshold=2,
++            context=context,
++        )
++        self.parser = SimpleNamespace(
++            parse=AsyncMock(
++                side_effect=error_module.VerificationRequiredException(
++                    "小黑盒要求验证码，暂时无法获取正文。", CANONICAL
++                )
++            ),
++            result=xiaoheihe.XiaoheiheParser.result,
++        )
++        self.plugin = main_module.ParserPlugin.__new__(main_module.ParserPlugin)
++        self.plugin.cfg = self.cfg
++        self.plugin.key_pattern_list = xiaoheihe.XiaoheiheParser._key_patterns
++        self.plugin.parser_map = {
++            key: self.parser for key, _ in self.plugin.key_pattern_list
++        }
++        self.plugin.arbiter = SimpleNamespace(compete=AsyncMock(return_value=True))
++        self.plugin.debouncer = SimpleNamespace(
++            hit_link=Mock(return_value=False), hit_resource=Mock(return_value=False)
++        )
++        self.plugin.sender = sender_module.MessageSender(self.cfg, Mock())
++        self.event = Mock(spec=AiocqhttpMessageEvent)
++        self.event.bot = Mock()
++        self.event.unified_msg_origin = "test:GroupMessage:123_456"
++        self.event.message_str = ""
++        self.event.message_obj = SimpleNamespace(
++            message_id="7", raw_message={"message_id": 7, "self_id": 999, "time": 1}
++        )
++        self.event.get_messages.return_value = [
++            Json(data=json.dumps(card(), ensure_ascii=False))
++        ]
++        self.event.get_self_id.return_value = "999"
++        self.event.get_sender_id.return_value = "123"
++        self.event.get_sender_name.return_value = "Alpha"
++        self.event.get_group_id.return_value = "456"
++        self.event.get_platform_id.return_value = "test"
++        self.event.get_platform_name.return_value = "aiocqhttp"
++        self.event.get_message_type.return_value = MessageType.GROUP_MESSAGE
++        self.event.is_private_chat.return_value = False
++        self.event.chain_result.side_effect = lambda chain: SimpleNamespace(chain=chain)
++        self.event.send = AsyncMock()
++        extras = {}
++        self.event.get_extra.side_effect = lambda key, default=None: extras.get(
++            key, default
++        )
++        self.event.set_extra.side_effect = extras.__setitem__
++
++    async def test_challenge_card_is_sent_as_limited_preview_and_remembered(self):
++        await self.plugin.on_message(self.event)
++        self.event.send.assert_awaited_once()
++        sent = self.event.send.call_args.args[0].chain[0].text
++        self.assertIn("未取得全文", sent)
++        self.assertIn("纸船实验", sent)
++        self.assertIn("蓝色纸船漂了十米", sent)
++        self.assertEqual(len(self.memory.rows), 1)
++        self.assertEqual(self.memory.rows[0]["qq"], "123")
++        self.assertEqual(self.memory.rows[0]["source_url"], CANONICAL)
++        self.assertIn("未取得全文", self.memory.rows[0]["text"])
++
++    async def test_failed_send_never_claims_a_delivered_preview(self):
++        self.event.send.side_effect = RuntimeError("fictional delivery failure")
++        await self.plugin.on_message(self.event)
++        self.assertEqual(self.memory.rows, [])
++
++    async def test_plain_link_reports_challenge_without_inventing_content(self):
++        self.event.get_messages.return_value = [Plain(URL)]
++        self.event.message_str = URL
++        await self.plugin.on_message(self.event)
++        self.event.send.assert_awaited_once()
++        self.assertIn("验证码", self.event.send.call_args.args[0].chain[0].text)
++        self.assertEqual(self.memory.rows, [])
++
++    async def test_other_parse_errors_are_not_relabelled_as_card_success(self):
++        self.parser.parse.side_effect = error_module.ParseException("post removed")
++        with self.assertRaisesRegex(error_module.ParseException, "post removed"):
++            await self.plugin.on_message(self.event)
++        self.event.send.assert_not_awaited()
++        self.assertEqual(self.memory.rows, [])
++
++    async def test_successful_fetch_keeps_actual_body_instead_of_card_preview(self):
++        self.parser.parse.side_effect = None
++        self.parser.parse.return_value = self.parser.result(
++            title="原文标题", text="完整正文", url=CANONICAL
++        )
++        await self.plugin.on_message(self.event)
++        self.assertIn("完整正文", self.memory.rows[0]["text"])
++        self.assertNotIn("未取得全文", self.memory.rows[0]["text"])
++
++    async def test_site_response_is_typed_and_other_errors_remain_errors(self):
++        parser = xiaoheihe.XiaoheiheParser.__new__(xiaoheihe.XiaoheiheParser)
++        parser.headers = {}
++        parser._request_json = AsyncMock(return_value={"status": "show_captcha"})
++        with self.assertRaises(error_module.VerificationRequiredException) as caught:
++            await parser._fetch_link_tree("111", {"x_xhh_tokenid": "fictional"})
++        self.assertEqual(caught.exception.source_url, CANONICAL)
++        parser._request_json.return_value = {"status": "not_found"}
++        with self.assertRaisesRegex(error_module.ParseException, "not_found"):
++            await parser._fetch_link_tree("111", {"x_xhh_tokenid": "fictional"})
++
++    async def test_disabled_scope_does_not_add_card_to_other_group(self):
++        self.event.get_group_id.return_value = "888"
++        await self.plugin.on_message(self.event)
++        self.assertEqual(self.memory.rows, [])
++
++    def test_preview_is_bounded_and_does_not_borrow_other_cards(self):
++        original = card()
++        self.assertIsNone(utils.extract_json_preview(original, "link_id=222"))
++        self.assertIsNone(utils.extract_json_preview("broken json", "link_id=111"))
++        self.assertIsNone(utils.extract_json_preview({"meta": []}, "link_id=111"))
++        original["meta"]["news"]["desc"] = "字" * 5000
++        self.assertLessEqual(
++            len(utils.extract_json_preview(original, "link_id=111")), 1200
++        )
++
++
++if __name__ == "__main__":
++    unittest.main()
