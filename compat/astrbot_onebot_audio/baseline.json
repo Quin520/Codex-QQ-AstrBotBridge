@@ -1,0 +1,16 @@
+{
+  "project": "AstrBot",
+  "version": "4.29.1",
+  "bridge_version": "v0.3.16",
+  "hash_algorithm": "sha256",
+  "files": {
+    "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py": {
+      "before": "b6d3cb2530cdfbd1dd1557ee43034d8da02610730570bc15a4474954edeede50",
+      "after": "711675b38fd8b760b3fe5df5a97b0e29e54b1d0604c4bac38bf63fc645c64299"
+    },
+    "tests/unit/test_aiocqhttp_audio_payload.py": {
+      "before": null,
+      "after": "0e1fb3ee7620c978df1469247e363ebdee6ff5b28a6d2c653cb30f222fdf1fc2"
+    }
+  }
+}

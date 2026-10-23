@@ -408,6 +408,7 @@ Codex 原生生成的图片还会保留在 `CODEX_HOME/generated_images/<会话I
 | 视频没有摘要 | 确认接入模式与视频开关已开启，实际 @了机器人，发送或引用的是当前会话 QQ 视频附件，`ffmpeg` / `ffprobe` 可用且大小未超限 |
 | 生图超时或只有文字 | 确认生图已开启、CLI 支持原生生图及文件权限，AstrBot 工具调用超时至少 300 秒；检查 `image_generation/last-error.log`，不要通过开放本机读取解决 |
 | 没有语音或每条都变语音 | 确认桥接语音开关、明确的 TTS 提供商 ID、Edge TTS 提供商启用、依赖与 ffmpeg 可用；按需模式关闭全局和主动插件的自动 TTS |
+| 点歌后 NapCat 报 `Max payload size exceeded` | 4.29.1 的 OneBot 语音发送会将压缩歌曲展开为 WAV，可能超过消息大小上限；备份后应用 [OneBot 音频补丁](compat/astrbot_onebot_audio/README.md)，再重启 AstrBot。仅更新桥接插件不会自动修改框架 |
 | v0.3.0 私聊只有自学习日志，没有正式回复 | 升级到 v0.3.1 并重启 AstrBot；旧版错误设置了 AstrBot 的默认模型请求抑制标志 |
 | 重启后桥接插件加载报 `KeyError: 'type'` | 升级到 v0.3.2 并重启 AstrBot；旧版没有正确读取 AstrBot 拆分保存的提供商配置 |
 | 表情包没发出 | 检查图包实际包含图片并启用；主动消息或插件请求还需 `chat_and_plugin_llm` 范围，配图本身是按需生成 |

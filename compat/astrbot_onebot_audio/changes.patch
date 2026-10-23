@@ -1,0 +1,233 @@
+--- a/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py
++++ b/astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py
+@@ -18,6 +18,7 @@
+     Video,
+ )
+ from astrbot.api.platform import Group, MessageMember
++from astrbot.core.utils.media_utils import MediaResolver
+ 
+ 
+ class AiocqhttpMessageEvent(AstrMessageEvent):
+@@ -36,8 +37,17 @@
+     async def _from_segment_to_dict(segment: BaseMessageComponent) -> dict:
+         """修复部分字段"""
+         if isinstance(segment, Image | Record):
+-            # For Image and Record segments, we convert them to base64
+-            bs64 = await segment.convert_to_base64()
++            if isinstance(segment, Record):
++                source = await segment._resolve_file_source()
++                if not source:
++                    raise ValueError("OneBot audio has no usable file source")
++                # OneBot handles audio codecs. Preserve the original bytes:
++                # expanding a song to WAV can exceed the WebSocket frame limit.
++                bs64 = await MediaResolver(source, media_type="file").to_base64()
++                if not bs64:
++                    raise ValueError("OneBot audio file is empty")
++            else:
++                bs64 = await segment.convert_to_base64()
+             return {
+                 "type": segment.type.lower(),
+                 "data": {
+--- /dev/null
++++ b/tests/unit/test_aiocqhttp_audio_payload.py
+@@ -0,0 +1,200 @@
++"""Exercise audio transport without a QQ account or external network service."""
++
++import base64
++import json
++import shutil
++import subprocess
++import wave
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++from aiohttp import web
++from PIL import Image as PILImage
++
++import astrbot.api  # noqa: F401
++from astrbot.api.event import MessageChain
++from astrbot.api.message_components import Image, Record
++from astrbot.core.platform.sources.aiocqhttp.aiocqhttp_message_event import (
++    AiocqhttpMessageEvent,
++)
++from astrbot.core.utils import media_utils
++from astrbot.core.utils.tencent_record_helper import wav_to_tencent_silk
++
++
++@pytest.fixture
++def resolver_temp(tmp_path, monkeypatch):
++    directory = tmp_path / "resolver"
++    directory.mkdir()
++    monkeypatch.setattr(media_utils, "get_astrbot_temp_path", lambda: str(directory))
++    return directory
++
++
++@pytest.fixture(scope="module")
++def mp3_path(tmp_path_factory):
++    executable = shutil.which("ffmpeg")
++    if not executable:
++        pytest.skip("ffmpeg is required for real audio transport tests")
++    path = tmp_path_factory.mktemp("audio") / "test song.mp3"
++    subprocess.run(
++        [
++            executable,
++            "-v",
++            "error",
++            "-f",
++            "lavfi",
++            "-i",
++            "sine=frequency=440:sample_rate=48000:duration=244",
++            "-ac",
++            "2",
++            "-b:a",
++            "192k",
++            str(path),
++        ],
++        check=True,
++        capture_output=True,
++        timeout=60,
++    )
++    return path
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize(
++    "reference_kind", ["path", "uri", "url_fallback", "path_fallback", "base64", "data"]
++)
++async def test_mp3_bytes_survive_all_record_sources(
++    mp3_path, resolver_temp, reference_kind
++):
++    original = mp3_path.read_bytes()
++    encoded = base64.b64encode(original).decode("ascii")
++    if reference_kind == "path":
++        record = Record(file=str(mp3_path))
++    elif reference_kind == "uri":
++        record = Record.fromFileSystem(str(mp3_path))
++    elif reference_kind == "url_fallback":
++        record = Record(file="missing.amr", url=mp3_path.as_uri())
++    elif reference_kind == "path_fallback":
++        record = Record(file="missing.amr", path=str(mp3_path))
++    elif reference_kind == "base64":
++        record = Record.fromBase64(encoded)
++    else:
++        record = Record(file=f"data:audio/mpeg;base64,{encoded}")
++
++    result = await AiocqhttpMessageEvent._from_segment_to_dict(record)
++
++    assert result["type"] == "record"
++    assert result["data"]["file"] == f"base64://{encoded}"
++    assert mp3_path.read_bytes() == original
++    assert list(resolver_temp.iterdir()) == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("endpoint", ["/song.mp3", "/download?id=test"])
++async def test_http_audio_preserved_even_without_extension(
++    mp3_path, resolver_temp, endpoint
++):
++    original = mp3_path.read_bytes()
++
++    async def serve_audio(request):
++        return web.Response(body=original, content_type="audio/mpeg")
++
++    app = web.Application()
++    app.router.add_get("/{name}", serve_audio)
++    runner = web.AppRunner(app)
++    await runner.setup()
++    site = web.TCPSite(runner, "127.0.0.1", 0)
++    await site.start()
++    try:
++        port = runner.addresses[0][1]
++        result = await AiocqhttpMessageEvent._from_segment_to_dict(
++            Record.fromURL(f"http://127.0.0.1:{port}{endpoint}")
++        )
++    finally:
++        await runner.cleanup()
++    assert base64.b64decode(result["data"]["file"][9:]) == original
++    assert list(resolver_temp.iterdir()) == []
++
++
++@pytest.mark.asyncio
++async def test_full_song_stays_below_napcat_limit(mp3_path, resolver_temp):
++    limit = 50 * 1024 * 1024
++    record = Record.fromFileSystem(str(mp3_path))
++    old_base64 = await record.convert_to_base64()
++    assert len(old_base64.encode("ascii")) > limit
++    messages = await AiocqhttpMessageEvent._parse_onebot_json(MessageChain([record]))
++    payload = json.dumps(
++        {"action": "send_group_msg", "params": {"group_id": 123, "message": messages}}
++    ).encode("utf-8")
++    assert len(payload) < limit
++    assert base64.b64decode(messages[0]["data"]["file"][9:]) == mp3_path.read_bytes()
++    assert list(resolver_temp.iterdir()) == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("format_name", ["wav", "silk"])
++async def test_voice_audio_keeps_its_original_codec(
++    tmp_path, resolver_temp, format_name
++):
++    path = tmp_path / "voice.wav"
++    with wave.open(str(path), "wb") as output:
++        output.setnchannels(1)
++        output.setsampwidth(2)
++        output.setframerate(24000)
++        output.writeframes(b"\0\0" * 2400)
++    if format_name == "silk":
++        pytest.importorskip("pysilk")
++        silk_path = tmp_path / "voice.silk"
++        await wav_to_tencent_silk(str(path), str(silk_path))
++        path = silk_path
++    original = path.read_bytes()
++    result = await AiocqhttpMessageEvent._from_segment_to_dict(
++        Record.fromFileSystem(str(path))
++    )
++    assert base64.b64decode(result["data"]["file"][9:]) == original
++    assert path.read_bytes() == original
++    assert list(resolver_temp.iterdir()) == []
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("is_group", [True, False])
++async def test_message_dispatch_uses_compressed_audio(
++    mp3_path, resolver_temp, is_group
++):
++    bot = SimpleNamespace(send_group_msg=AsyncMock(), send_private_msg=AsyncMock())
++    await AiocqhttpMessageEvent.send_message(
++        bot,
++        MessageChain([Record.fromFileSystem(str(mp3_path))]),
++        is_group=is_group,
++        session_id="123",
++    )
++    target = bot.send_group_msg if is_group else bot.send_private_msg
++    target.assert_awaited_once()
++    message = target.call_args.kwargs["message"][0]
++    assert base64.b64decode(message["data"]["file"][9:]) == mp3_path.read_bytes()
++
++
++@pytest.mark.asyncio
++async def test_invalid_record_fails_and_cleans_up(tmp_path, resolver_temp):
++    empty = tmp_path / "empty.mp3"
++    empty.touch()
++    for record, error in [
++        (Record(file=""), ValueError),
++        (Record.fromBase64("!"), ValueError),
++        (Record.fromFileSystem(str(empty)), ValueError),
++        (Record(file=str(tmp_path / "missing.mp3")), FileNotFoundError),
++    ]:
++        with pytest.raises(error):
++            await AiocqhttpMessageEvent._from_segment_to_dict(record)
++    assert list(resolver_temp.iterdir()) == []
++
++
++@pytest.mark.asyncio
++async def test_image_serialization_is_unchanged(tmp_path, resolver_temp):
++    path = tmp_path / "test.png"
++    PILImage.new("RGB", (2, 2), "red").save(path)
++    image = Image.fromFileSystem(str(path))
++    expected = await image.convert_to_base64()
++    assert await AiocqhttpMessageEvent._from_segment_to_dict(image) == {
++        "type": "image",
++        "data": {"file": f"base64://{expected}"},
++    }
