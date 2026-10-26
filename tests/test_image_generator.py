@@ -165,10 +165,16 @@ class ImageGeneratorTests(unittest.IsolatedAsyncioTestCase):
             reasoning_effort="medium",
             image_generation=True,
         )
-        with patch(
-            "astrbot_plugin_local_codex.runner.asyncio.create_subprocess_exec",
-            side_effect=[login, turn],
-        ) as spawn:
+        with (
+            patch(
+                "astrbot_plugin_local_codex.runner.asyncio.create_subprocess_exec",
+                side_effect=[login, turn],
+            ) as spawn,
+            patch(
+                "astrbot_plugin_local_codex.runner.collect_process_output",
+                new_callable=AsyncMock, return_value=(output_for(), b""),
+            ),
+        ):
             await runner.run("new image only", None, ephemeral=True)
         argv = spawn.call_args_list[1].args
         self.assertNotIn("--sandbox", argv)

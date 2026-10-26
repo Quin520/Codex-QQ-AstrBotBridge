@@ -59,6 +59,14 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
                 {"owner_qq": "123", "group_qq": "456", "codex_exe": sys.executable},
             )
         self.plugin.runner.run = AsyncMock(return_value=(THREAD, "Test answer"))
+        async def exchange(process, prompt, *args, **kwargs):
+            return await process.communicate(prompt)
+        # Parameter-contract tests mock I/O; real pipe behavior is tested separately.
+        io_patch = patch(
+            "astrbot_plugin_local_codex.runner.collect_process_output", exchange
+        )
+        io_patch.start()
+        self.addCleanup(io_patch.stop)
 
     def test_allowlist_allows_group_members_but_keeps_private_owner_only(self):
         config = {"owner_qq": "123", "group_qq": "456"}
@@ -102,6 +110,10 @@ class BridgeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn('web_search="disabled"', argv)
             for feature in ("shell_tool", "unified_exec", "apps", "plugins"):
                 self.assertEqual(argv[argv.index(feature) - 1], "--disable")
+            self.assertEqual(
+                spawn.call_args.kwargs["env"]["RUST_LOG"],
+                "error,codex_core::responses_retry=warn",
+            )
             turn.communicate.assert_awaited_once_with(prompt.encode("utf-8"))
 
     async def test_web_search_does_not_enable_local_execution(self):

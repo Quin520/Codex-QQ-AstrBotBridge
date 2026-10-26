@@ -18,6 +18,7 @@ from astrbot.core.config.default import DEFAULT_CONFIG
 from astrbot_plugin_local_codex.integration import configure_provider
 from astrbot_plugin_local_codex.main import LocalCodex
 from astrbot_plugin_local_codex.provider import PROVIDER_ID, LocalCodexProvider
+from astrbot_plugin_local_codex.runner import CodexRateLimitError
 
 from .test_bridge import THREAD, event_for
 
@@ -411,6 +412,32 @@ class ProviderTests(unittest.IsolatedAsyncioTestCase):
             },
         )
         self.tools = ToolSet(tools=[self.tool])
+
+    async def test_rate_limit_rejects_queued_work_then_allows_recovery(self):
+        self.provider.request_slots = asyncio.Semaphore(1)
+        entered, release = asyncio.Event(), asyncio.Event()
+
+        async def limited(*args, **kwargs):
+            entered.set()
+            await release.wait()
+            raise CodexRateLimitError(293)
+
+        self.run.side_effect = limited
+        first = asyncio.create_task(self.provider.text_chat(prompt="Chat"))
+        await asyncio.wait_for(entered.wait(), 1)
+        queued = asyncio.create_task(self.provider.text_chat(prompt="Background"))
+        release.set()
+        outcomes = await asyncio.gather(first, queued, return_exceptions=True)
+        self.assertTrue(all(isinstance(error, CodexRateLimitError) for error in outcomes))
+        self.assertEqual(self.run.await_count, 1)
+        with self.assertRaises(CodexRateLimitError):
+            await self.provider.text_chat(prompt="Another message")
+        self.assertEqual(self.run.await_count, 1)
+        self.provider.rate_limit_until = 0
+        self.run.side_effect = None
+        answer = await self.provider.text_chat(prompt="After cooldown")
+        self.assertEqual(answer.completion_text, "Hello")
+        self.assertEqual(self.run.await_count, 2)
 
     async def test_persona_history_and_plugin_extra_context_are_preserved(self):
         contexts = [{"role": "assistant", "content": "Earlier answer"}]

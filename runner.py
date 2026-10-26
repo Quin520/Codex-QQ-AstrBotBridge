@@ -2,10 +2,109 @@
 
 import asyncio
 import json
+import math
 import os
+import re
 import subprocess
 import uuid
 from pathlib import Path
+
+
+class CodexRateLimitError(RuntimeError):
+    """A real upstream 429, with the CLI's advertised retry delay."""
+
+    def __init__(self, retry_after_seconds: int):
+        self.retry_after_seconds = max(1, retry_after_seconds)
+        super().__init__(
+            f"Codex 服务限流（HTTP 429），请约 {self.retry_after_seconds} 秒后重试。"
+        )
+
+
+def rate_limit_from_log(line: bytes) -> CodexRateLimitError | None:
+    """Accept only the native retry logger, never a model answer or tool output."""
+    text = line.decode("utf-8", errors="replace")
+    if not (
+        "codex_core::responses_retry:" in text
+        and "stream disconnected - retrying sampling request" in text
+        and re.search(r"\b429 Too Many Requests\b", text)
+    ):
+        return None
+    delay = re.search(r"\(\d+/\d+ in (\d+(?:\.\d+)?)s\)", text)
+    return CodexRateLimitError(math.ceil(float(delay[1])) if delay else 300)
+
+
+async def collect_process_output(
+    process, prompt: bytes, directory: Path, timeout: int, *, stop
+):
+    """Drain both pipes, retaining partial diagnostics on timeout/cancellation.
+
+    The caller supplies its owned-process terminator. A native 429 is surfaced immediately so
+    its multi-minute retry sleep cannot outlive the bridge's request deadline.
+    """
+    limited = asyncio.get_running_loop().create_future()
+
+    async def read_stream(stream, path: Path, watch_retry: bool):
+        output = bytearray()
+        pending = b""
+        with path.open("wb") as log:
+            while chunk := await stream.read(65536):
+                log.write(chunk)
+                log.flush()
+                output.extend(chunk)
+                if not watch_retry:
+                    continue
+                pending += chunk
+                while b"\n" in pending:
+                    line, pending = pending.split(b"\n", 1)
+                    error = rate_limit_from_log(line)
+                    if error and not limited.done():
+                        limited.set_result(error)
+                # Retry messages are short; do not retain an unlimited partial line.
+                pending = pending[-16384:]
+            if watch_retry and pending and not limited.done():
+                error = rate_limit_from_log(pending)
+                if error:
+                    limited.set_result(error)
+        return bytes(output)
+
+    async def write_prompt():
+        try:
+            process.stdin.write(prompt)
+            await process.stdin.drain()
+        except (BrokenPipeError, ConnectionResetError):
+            # Like Process.communicate(), let the child's exit/log explain this.
+            pass
+        finally:
+            process.stdin.close()
+
+    async def exchange():
+        async with asyncio.TaskGroup() as group:
+            stdout = group.create_task(read_stream(process.stdout, directory / "last-run.jsonl", False))
+            stderr = group.create_task(read_stream(process.stderr, directory / "last-error.log", True))
+            group.create_task(write_prompt())
+            group.create_task(process.wait())
+        return stdout.result(), stderr.result()
+
+    communication = asyncio.create_task(exchange())
+    try:
+        done, _ = await asyncio.wait(
+            {communication, limited}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+        if limited in done:
+            raise limited.result()
+        if communication not in done:
+            raise TimeoutError(f"Codex 模型请求超过 {timeout} 秒，已保留本次诊断日志。")
+        return await communication
+    finally:
+        limited.cancel()
+        if not communication.done():
+            # Keep draining while killing the child; a full pipe must not block
+            # Process.wait() during timeout or plugin unload.
+            try:
+                await stop()
+            finally:
+                communication.cancel()
+                await asyncio.gather(communication, return_exceptions=True)
 
 
 def parse_result(output: bytes) -> tuple[str, str]:
@@ -132,6 +231,9 @@ class CodexRunner:
         env = os.environ.copy()
         for key in ("OPENAI_API_KEY", "CODEX_API_KEY", "OPENAI_BASE_URL"):
             env.pop(key, None)
+        # CLI exec normally hides WARN diagnostics, including 429 retry sleeps.
+        # Enable only this target; broad INFO/DEBUG logs include account metadata.
+        env["RUST_LOG"] = "error,codex_core::responses_retry=warn"
         options = (
             {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
         )
@@ -238,12 +340,10 @@ class CodexRunner:
             **options,
         )
         try:
-            stdout, stderr = await asyncio.wait_for(
-                self.process.communicate(prompt.encode("utf-8")),
-                self.timeout,
+            stdout, stderr = await collect_process_output(
+                self.process, prompt.encode("utf-8"), self.data_dir, self.timeout,
+                stop=self.stop,
             )
-            (self.data_dir / "last-run.jsonl").write_bytes(stdout)
-            (self.data_dir / "last-error.log").write_bytes(stderr)
             if self.process.returncode:
                 raise RuntimeError(
                     f"Codex exited with code {self.process.returncode}; check the local run log."

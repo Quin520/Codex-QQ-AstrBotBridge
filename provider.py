@@ -5,7 +5,9 @@ import base64
 import copy
 import json
 import mimetypes
+import math
 import tempfile
+import time
 import uuid
 from pathlib import Path
 
@@ -18,7 +20,7 @@ from astrbot.core.utils.media_utils import resolve_media_ref_to_base64_data
 from jsonschema.protocols import Validator
 from referencing import Registry
 
-from .runner import CodexRunner
+from .runner import CodexRateLimitError, CodexRunner
 
 PROVIDER_ID = "local_codex"
 PROVIDER_TYPE = "local_codex_cli"
@@ -146,6 +148,7 @@ class LocalCodexProvider(Provider):
         )
         self.active_requests: set[asyncio.Task] = set()
         self.closed = False
+        self.rate_limit_until = 0.0
 
     def get_current_key(self) -> str:
         """Return no API key; the CLI manages its own ChatGPT login."""
@@ -302,6 +305,9 @@ class LocalCodexProvider(Provider):
         async with self.request_slots:
             if self.closed:
                 raise RuntimeError("The local Codex provider has been unloaded.")
+            remaining = math.ceil(self.rate_limit_until - time.monotonic())
+            if remaining > 0:
+                raise CodexRateLimitError(remaining)
             with tempfile.TemporaryDirectory(
                 prefix="request-", dir=self.data_dir
             ) as temporary:
@@ -361,6 +367,12 @@ class LocalCodexProvider(Provider):
                 self.active_requests.add(task)
                 try:
                     _, answer = await task
+                except CodexRateLimitError as exc:
+                    self.rate_limit_until = max(
+                        self.rate_limit_until,
+                        time.monotonic() + exc.retry_after_seconds,
+                    )
+                    raise
                 finally:
                     self.active_requests.discard(task)
                     # Each in-flight request owns its process and output files.
