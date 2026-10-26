@@ -123,6 +123,29 @@ class CoverSourcesTests(unittest.IsolatedAsyncioTestCase):
     async def find(self, event=None, title="Fixture song"):
         return json.loads(await self.service.find(event or self.event, title))
 
+    async def test_bili_player_025_search_explicitly_uses_audio_and_preserves_lease(self):
+        response = {"status": "candidates", "search_id": "new-lease", "candidates": [{"position": 1}]}
+        self.original.find_in_bilibili_for_llm = AsyncMock(return_value=json.dumps(response))
+        result = await self.find()
+        self.assertEqual(result["search_id"], "new-lease")
+        self.original.find_in_bilibili_for_llm.assert_awaited_once_with(self.event, "Fixture song", delivery="audio")
+        self.original.find_music_for_llm.assert_not_awaited()
+        self.player.fetch_songs.assert_not_awaited()
+
+    async def test_music_33_reviewed_netease_module_can_supply_fallback(self):
+        root = "data.plugins.astrbot_plugin_music.core.platform.netease"
+        player_type = type("NetEaseMusic", (), {"__module__": root})
+        module = ModuleType(root)
+        module.NetEaseMusic = player_type
+        player = player_type()
+        player.fetch_songs = self.player.fetch_songs
+        player.fetch_extra = self.player.fetch_extra
+        self.plugin.get_player.return_value = player
+        with patch.dict(sys.modules, {root: module}):
+            result = await self.find()
+        self.assertEqual(result["status"], "candidates")
+        player.fetch_songs.assert_awaited_once()
+
     async def test_primary_candidates_are_preserved_without_contacting_fallback(self):
         response = {
             "status": "candidates",

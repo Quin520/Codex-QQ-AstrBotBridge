@@ -133,7 +133,11 @@ class CoverSources:
             return None
         player = plugin.get_player(default=True)
         root = type(plugin).__module__.rsplit(".", 1)[0]
-        module_path = root + ".core.platform.ncm"
+        # Music 3.x renamed ncm.py to netease.py; accept only those two concrete
+        # reviewed implementations, never an arbitrary default player.
+        module_path = type(player).__module__ if player is not None else ""
+        if module_path not in {root + ".core.platform.ncm", root + ".core.platform.netease"}:
+            return None
         module = sys.modules.get(module_path)
         if (
             player is None
@@ -165,14 +169,21 @@ class CoverSources:
         generation = self._generations[key]
         previous = {"status": "error", "message": "Bilibili 听歌插件尚未就绪。"}
         original = self._plugin("astrbot_plugin_listen_music", "ListenMusicPlugin")
+        if original is None:
+            original = self._plugin("astrbot_plugin_bili_player", "ListenMusicPlugin")
+        media_search = getattr(original, "find_in_bilibili_for_llm", None)
+        legacy_search = getattr(original, "find_music_for_llm", None)
         if (
             original is not None
             and getattr(original, "_initialized", False)
-            and callable(getattr(original, "find_music_for_llm", None))
+            and (callable(media_search) or callable(legacy_search))
         ):
             try:
                 async with asyncio.timeout(35):
-                    result = await original.find_music_for_llm(event, title)
+                    if callable(media_search):
+                        result = await media_search(event, title, delivery="audio")
+                    else:
+                        result = await legacy_search(event, title)
                 parsed = json.loads(result)
                 if isinstance(parsed, dict):
                     previous = parsed

@@ -1,0 +1,101 @@
+{
+  "upstream_commit": "635fc18eeb84e3c7b58661425359244552286835",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "_conf_schema.json",
+      "before_lf_sha256": "5708df5833696aad91922d9cd84d18223d8df87329b56a830c0d512fa01f6aaa",
+      "after_lf_sha256": "56eadfda358c97d9a5f4a7d1204c13e017bacc4105d46fa5b2a6712c3b52a3f7"
+    },
+    {
+      "path": "admin/js/components/config/ConfigRenderer.jsx",
+      "before_lf_sha256": "9ced90ebee82bdf6b96502bc3f7a7cec63120788c7841225749224c547ec9433",
+      "after_lf_sha256": "5becf6ea4a86e1dddfabcfb753945f3dd749d022d9dea6bf6a5acf15397ce8bb"
+    },
+    {
+      "path": "core/chat_flow.py",
+      "before_lf_sha256": "e52bb7eed0b63eccfc6ae9c5b6479586c5056ff4498bd66584780572facad8e8",
+      "after_lf_sha256": "b75d01c9463ad3082a9daae03ca26965f519dca7545d648e0dd10c3441550148"
+    },
+    {
+      "path": "core/data_storage.py",
+      "before_lf_sha256": "8b6ae9708d47dae3c5c4b8676df86dee5a126d0eb99d6d462305c91655c1fe64",
+      "after_lf_sha256": "bcd5b0a05fe4540d99eba631a7c235eb84bcbc6fa2e869ddc42428e31bc31c8d"
+    },
+    {
+      "path": "core/llm_adapter.py",
+      "before_lf_sha256": "9fe95af85bce22b2e1c19bc43a7bf65b3c90ee285ebab4c562b9a3d066d85b7c",
+      "after_lf_sha256": "35aa59e1ed3a2271c6f2ae2f4645afe8f286c0c8e349bb626f0d4a7c18363a7a"
+    },
+    {
+      "path": "core/message_events.py",
+      "before_lf_sha256": "49684893a476bdb6c54a5ef75adc3af9fc74f8a2d232e799eba78ae78619d2cd",
+      "after_lf_sha256": "66969a27a97f97cb357ba52a2e6684cc6ad2290adc3b2ff4fac22f4ffce05583"
+    },
+    {
+      "path": "core/message_sender.py",
+      "before_lf_sha256": "82fb9d19047d9222271fe9c9d4e7f2c5c0a2f11e92e0e050a901dd348d3317bb",
+      "after_lf_sha256": "f6d1862ed71cdb1d0c063de009e5bead47841d94834cec08fd080ec94cc30754"
+    },
+    {
+      "path": "core/plugin_lifecycle.py",
+      "before_lf_sha256": "f912cb15503b3af17ff63a4073d9364904db8c738c2b32d6a2bdac8e791661d2",
+      "after_lf_sha256": "0ae289120df4a35a5c2f5caa74738a089808ce93ff0a50baa7e3dbd30cd38407"
+    },
+    {
+      "path": "core/proactive_event.py",
+      "before_lf_sha256": "85aba23e56934eb98e2c9efccafe9463fc02689520687bb3dd5139f2492ff244",
+      "after_lf_sha256": "68534916296171177600edb54a0f2ad31f3f96b7d02c57e9983dc22431f52140"
+    },
+    {
+      "path": "core/session_override_manager.py",
+      "before_lf_sha256": "64812baa76a87084eb2cbe31de85e49bc45a7de8a92358b482d0370abb6d662f",
+      "after_lf_sha256": "04467c93d14a085e59160f61175ac57f6e2b529a4db7cd5331909c956ceb0368"
+    },
+    {
+      "path": "core/session_parser.py",
+      "before_lf_sha256": "e455dc1f301116c4575ce3eb6f5161c0a8c7af38688bfbf6cabd9604af84daf9",
+      "after_lf_sha256": "01e60a758423e04bed90dedb52877d43e7b43c0389864314c753458d8b328778"
+    },
+    {
+      "path": "core/task_scheduler.py",
+      "before_lf_sha256": "0439eea220c86f161ad5edd9204cb9889a144baf55870a2e9db4131653247f51",
+      "after_lf_sha256": "74557631941a548089609e74d41356a43d6ab4790fb049cb98344507ebfd9d6a"
+    },
+    {
+      "path": "core/web_admin_server.py",
+      "before_lf_sha256": "33169ddccab2ebe8927ad7c10e2995d09e710943795b2c0f646369adc89208db",
+      "after_lf_sha256": "c955cd04396a5e3b79344fc49cca25cb62b26173568b2622a0e7d5140d400c61"
+    },
+    {
+      "path": "tests/test_bridge_sessions.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "5003d89f1068f51e581d2210aae9b92a352f9c94a419328a5c491df849e15b14"
+    },
+    {
+      "path": "tests/test_console_auth.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "a72475c99538a1f49a7dbb1c20b829b159e92bf86781da074db52710b21cdc8a"
+    },
+    {
+      "path": "tests/test_interval_config_ui.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "d8977046bf2c29cca35996fc33022b0d847d55658e7748f272fa8761375b61cd"
+    },
+    {
+      "path": "tests/test_interval_scheduling.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "9079f729be7fb42de33c02b5107888b97b9cd940472b2527b4ae42703e865b9f"
+    },
+    {
+      "path": "tests/test_proactive_delivery_guard.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "40a1e1352143d793ce00eea81aa1ae031e532dd7e9a9be81574a6576eb4c0b0a"
+    },
+    {
+      "path": "tests/test_proactive_llm.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "0de3ce853348af03022514d770406a21febcf2747919e452cd4bc00307562160"
+    }
+  ]
+}

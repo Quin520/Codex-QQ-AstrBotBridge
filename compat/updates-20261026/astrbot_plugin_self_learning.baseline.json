@@ -1,0 +1,256 @@
+{
+  "upstream_commit": "9cbe0941da501779932e726f35bb8c17be9de6c7",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "README.md",
+      "before_lf_sha256": "3e712f569c5b1e8c51d1e0c33c00f1aa67b59e5db42106f1553a666af0d019ba",
+      "after_lf_sha256": "a4a37c5dfc38fccad22e51c0691e3e4f46def650015bbd00f68fb03b2be27ba9"
+    },
+    {
+      "path": "_conf_schema.json",
+      "before_lf_sha256": "26729820c891369ed0582e501829fb85286f9edd4a185f439947eaba33cec240",
+      "after_lf_sha256": "0a2f4f8f3ab7120de348ea1536542601faa7f37c34bc90227d94adfeb5b0f1da"
+    },
+    {
+      "path": "config.py",
+      "before_lf_sha256": "fd935b32de77bfa6f1c60cebf4b0fe3be29edc18a27b436d8203d16bd20fe967",
+      "after_lf_sha256": "5ee4d5dbafc8621d96b43de384eb13ab00895c7b7c7bcffdef4052032654ecb6"
+    },
+    {
+      "path": "core/plugin_lifecycle.py",
+      "before_lf_sha256": "eca5dfea8b2ea3674b5a7fb6c1fcafd346e420b104d51bd1e20202b70c31d4f7",
+      "after_lf_sha256": "e374504d2fdc78d1c8643d1fb0d4626c40669fea42dc588bf46d323ed085aa9e"
+    },
+    {
+      "path": "main.py",
+      "before_lf_sha256": "e0965daab591a5ccaf78cfe21f1535de1887b1586bffa29dd925d107e91de3c8",
+      "after_lf_sha256": "2c987ac606fd2f11c03578def06b5c24af4e43fb65040eca5d163c07bdf0670e"
+    },
+    {
+      "path": "models/orm/affection.py",
+      "before_lf_sha256": "99e88b54174ed3b569306d7daf33def6ff5384bb3ac2f3ae605c006205b78347",
+      "after_lf_sha256": "208dd7e7cb0f5ca759dfe04f0207d704735f65ce718b92efbeb15efb41f6294b"
+    },
+    {
+      "path": "repositories/affection_repository.py",
+      "before_lf_sha256": "7aed6e37e1758bc52b96eb6f3e483354a494164f46e671382ff32840b72776f2",
+      "after_lf_sha256": "f74e88953465d7dcda726e57168868666d1161aa2a6600e25e701cf1a4297257"
+    },
+    {
+      "path": "services/analysis/expression_pattern_learner.py",
+      "before_lf_sha256": "527e1c0b4bba36027e25612ca2d6c5c903851bdb34b7171fd5931f30a53a9597",
+      "after_lf_sha256": "ead2f9f01b1433d0f41e1f8b8b8bc563ebcb38387c240e950b1f102744e01dbb"
+    },
+    {
+      "path": "services/commands/handlers.py",
+      "before_lf_sha256": "d87338dc8f5be8f32fe8960a38a6432908dd3e2eff0413f16926fb0576dc296b",
+      "after_lf_sha256": "9c2f01c1583230a9c0cd4c7c7c5b9e69c950507fa70eb823076d09ed89cc8160"
+    },
+    {
+      "path": "services/core_learning/progressive_learning.py",
+      "before_lf_sha256": "0fb32dd9afb8696fd0bb025a05d225c6bde2634eca6b0815e795454e9afd3bbc",
+      "after_lf_sha256": "30d8a25d64309e58b2d7e13334a68cd98bd1aee4286ebd358240ed6561f56826"
+    },
+    {
+      "path": "services/database/facades/affection_facade.py",
+      "before_lf_sha256": "e8f8aed2da62abf12c23dd594f44dbe91caf7690ed2dd88070cdc84be3f13f0f",
+      "after_lf_sha256": "ae5bc4aea2677d6f6a38b721119aa94ac56a3428a4b398fbd7a5b1ba5ca3bc08"
+    },
+    {
+      "path": "services/database/facades/jargon_facade.py",
+      "before_lf_sha256": "5e4c58b9cec8d0611d10805e87c2561f731d0efb0fa0d7402b8db8863f31495b",
+      "after_lf_sha256": "2bfc6d64d3934155092694c4b1fa982daa5be54b105dfe29887cd29e92645bf1"
+    },
+    {
+      "path": "services/database/facades/learning_facade.py",
+      "before_lf_sha256": "8d8f5d44e988c14323d7fba586dc19fdb6d4a040cd29bfbdaf0742ad1a10cda2",
+      "after_lf_sha256": "9a602e95b4660554d23ae312ec4104e18e15401009ab32d782736a1d839183d1"
+    },
+    {
+      "path": "services/database/sqlalchemy_database_manager.py",
+      "before_lf_sha256": "0053eb9b6ae01ebc35cf538eec0eb26811c621985cb9596e1c3115af60c5dab4",
+      "after_lf_sha256": "91e8ccd1b3027745b160de5a8ae50ac16f0b2a5154ddafc5bda416d38900a60c"
+    },
+    {
+      "path": "services/hooks/llm_hook_handler.py",
+      "before_lf_sha256": "c6b86be3d960eae906dc5fc67b14d6b98681722fd4eea9fdc5ed42172d56d9f4",
+      "after_lf_sha256": "f211e394426c66b7cf0901a73a0b408c517b04c41810c81000e668e3bb083fde"
+    },
+    {
+      "path": "services/jargon/jargon_miner.py",
+      "before_lf_sha256": "ee02586a634c211190124a8f8f68c34dc512270380ab79a961fd4468327f8adc",
+      "after_lf_sha256": "f43322a44339a1f71c92e73ae1bb1c29351a7b8e781bb9cc0537b36767666231"
+    },
+    {
+      "path": "services/learning/affection_review.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "e7616f8890a972215d561a0cf495b341eb821c4d556b66996071cbca79877073"
+    },
+    {
+      "path": "services/learning/approval_baseline.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "046e5c51b4f742b46d3fdfdf647c3503c3fd478cc16467e13d4b62191bdeadfb"
+    },
+    {
+      "path": "services/learning/expression_learning.py",
+      "before_lf_sha256": "930b7c6cefcf5c6193797aaf666f14066dc2327c690bff9979eddc30c260520b",
+      "after_lf_sha256": "18964f24a7ae46ecdc3ffee0b83d285de9d44b13f7bd69c6f6aa1066ea626ff8"
+    },
+    {
+      "path": "services/learning/expression_review.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "eae6ea8604c7be615a62746bc0357ab7563a8b3173c716beebca5e8a75030484"
+    },
+    {
+      "path": "services/learning/forgetting_manager.py",
+      "before_lf_sha256": "fa9eef46602de1b5d316dbd4034aad01d88bf2e6a297f4ee098e6322655ca7b6",
+      "after_lf_sha256": "5f65abcd6bdd414a9f1c4c1efb17343c1a4651d92dbad1c03015319ba5f23245"
+    },
+    {
+      "path": "services/learning/persona_learning.py",
+      "before_lf_sha256": "3544658e279c391f03416d50e3d45ad555a8cf71b8f110c5126e95a9e337f5ca",
+      "after_lf_sha256": "ff4fbc7f34d11e78ad5a37e9741bb41c978b810967647021042f2db6a307e50b"
+    },
+    {
+      "path": "services/learning/remember_service.py",
+      "before_lf_sha256": "eef024e575ef2f1ed2349a9628a8f2ba27dd984e6de8c0f2188c306fa398ca1c",
+      "after_lf_sha256": "69a4958a1c35ebee2035b4bc7d576622229b5ff735f3041cd9064d50ae6d2948"
+    },
+    {
+      "path": "services/persona/persona_updater.py",
+      "before_lf_sha256": "0b9c8b6d7c89e1a01784c23057f58823f80c90d6de28b83a0a5f6e5ab926030a",
+      "after_lf_sha256": "cfa86bc6b4b0ead309d05a6be18463ffc30e71850ab5e2c1ccd7aa6e24b55f1c"
+    },
+    {
+      "path": "services/persona/temporary_persona_updater.py",
+      "before_lf_sha256": "8bcb8b72a9605470443121b25879f2a7c0e216980c897df3c02f83baad62f4ee",
+      "after_lf_sha256": "11b6fc006ce3a13939ab7ce56973ecddf2341035d92908e8b5b7c59ab1cbbffd"
+    },
+    {
+      "path": "services/response/response_diversity_manager.py",
+      "before_lf_sha256": "f5945a372b1fb5fd83ab46e73700dd854bf7883f9ab52a7fcecd1bb51b412592",
+      "after_lf_sha256": "5ecedc04d4ae102d909e2a4a6834ee7878ca8755ffaae6ffac7f818781ea8392"
+    },
+    {
+      "path": "services/state/affection_manager.py",
+      "before_lf_sha256": "f362a4d769939a71d622161d6cd74ee04f2b4f89c7eefe5ca13fc493f650b794",
+      "after_lf_sha256": "fcddaf3666aba65a400e53811f90e00ff3e090796813972a160e42a84393252d"
+    },
+    {
+      "path": "tests/conftest.py",
+      "before_lf_sha256": "da50b45934123da7d465574e1d89449cdab79ad4651dead6428f859741a90583",
+      "after_lf_sha256": "acdaa14d701961dad4df6b650f3376df6737e405b97e8393add2d97d4d8d1636"
+    },
+    {
+      "path": "tests/integration/test_metrics_service_endpoints.py",
+      "before_lf_sha256": "d6a0f4da4c6cc29bb1a63667f6908e45f8f843cfdf97564cc62e27f2c858a450",
+      "after_lf_sha256": "003cdf65b4d7a28b611148fdc80f70b18f643225cce971cf80cd51d714fa3121"
+    },
+    {
+      "path": "tests/integration/test_profile_review_access.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "52c16c691a49e56a322ce435f40fa77c30c4735e80e3594dab737d491500a358"
+    },
+    {
+      "path": "tests/test_bridge_natural_style.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "a41304edb2ec1918428ad79338d0c556ed46725ef042d4e04ee70814346bce6f"
+    },
+    {
+      "path": "tests/test_bridge_proactive_social.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "4b0008e9a8a2af4f4c0c204816fffed4a7b7a6e463387485673291b52a63da0b"
+    },
+    {
+      "path": "tests/unit/test_forgetting_manager.py",
+      "before_lf_sha256": "fa30ed3c869d1c17e0675e5c6a68e8addaf4ab5ba37e9433fe3564a506e649f8",
+      "after_lf_sha256": "0885fa20da5e8ff349d6e248cf2dfd99db212246fb3bfaac1135d61021f68383"
+    },
+    {
+      "path": "tests/unit/test_learning_approval_gate.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "4fc64a184d0c37ec47ebb801d111c8865ce55a87fbd97f9932bd591b425de5bd"
+    },
+    {
+      "path": "web_src/src/components/business/LearningApprovalPanel.test.tsx",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "1a52b581b7c1449d944ee2851b878bd89506cc53d5c8e4d8d840981ea3d0e6a9"
+    },
+    {
+      "path": "web_src/src/components/business/LearningApprovalPanel.tsx",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "6f7b71a8bd1fe581f6e77d0ba501363ce7d7d9c9795afb5a8d3829971b071bc5"
+    },
+    {
+      "path": "web_src/src/components/business/ReviewCard.module.scss",
+      "before_lf_sha256": "d8698ab4cf01f1fcec09e4c6145ed84291b3d93d23ac7af52321df86edf91831",
+      "after_lf_sha256": "2f4b4cfc763c988ce3ba88d3bc2abbe11c9978bd3efa8c703f61cb31912a01d7"
+    },
+    {
+      "path": "web_src/src/components/business/ReviewCard.test.tsx",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "cf569b1632f68a4ade1b481c672470c96ec4077444f1a57495df0164c28cbff7"
+    },
+    {
+      "path": "web_src/src/components/business/ReviewCard.tsx",
+      "before_lf_sha256": "e243e787dcb8b67beeffe3db88fbfc7873a6811d0a0ed7280ccbe9a9da38606d",
+      "after_lf_sha256": "476eca66168b8b8ff5a2b774564ddd4f9d69f940b5d30cc3664f07ec8dc8c69f"
+    },
+    {
+      "path": "web_src/src/pages/emotion/EmotionBoardPage.tsx",
+      "before_lf_sha256": "95f9428cbf2ace6b33266e411754e03c86294abc15753d740f8000f2c0a9fcd6",
+      "after_lf_sha256": "14c99c510917ef50d1cfe0a5767c45f61e9f076e8392490a4282e88d75dd31df"
+    },
+    {
+      "path": "web_src/src/pages/reviews/ReviewsPage.tsx",
+      "before_lf_sha256": "bda6c58feea97c31ea4c4bae4a093e44b054a0aa44051b948bdf9d54105c6f60",
+      "after_lf_sha256": "d05ae0a2381abb2a3ac232623575216dc2fd7d48ae82f8eb3791b0d0d30dbc9e"
+    },
+    {
+      "path": "web_src/src/stores/dashboard.tsx",
+      "before_lf_sha256": "61cb4c7443fc694fdfc2079af1de942606e1cd2bc7e7fd52c042f50a8922f705",
+      "after_lf_sha256": "af8a2f66ebcaaba0cd6b6faf74c73c42826db76f052465f33e2a37f5fc78e4e5"
+    },
+    {
+      "path": "webui/blueprints/hub.py",
+      "before_lf_sha256": "07800daa352f97a99bb65d046661be0c4743ba41e277907874e7bd95a1931fc7",
+      "after_lf_sha256": "a84e62e0159d56148a417679b3d971a8728306f6312ac89bfd765544bcd934e2"
+    },
+    {
+      "path": "webui/blueprints/jargon.py",
+      "before_lf_sha256": "94634081298145fef21c1ba0f167f78bd1b5d9d1754a030846319561228bf531",
+      "after_lf_sha256": "242ddeb35e36eeae1edce88ed29047433adfa96c97b27aea69aa28f0666b6e09"
+    },
+    {
+      "path": "webui/blueprints/learning.py",
+      "before_lf_sha256": "a2530cd1a02a22100ffeafafb2c401853e9ddb20d688f4858bf8fddbd6c7b240",
+      "after_lf_sha256": "ba65db00748a7d085d69bceafa724e66a74a4d91806d6747ccebd086d0fe315b"
+    },
+    {
+      "path": "webui/blueprints/metrics.py",
+      "before_lf_sha256": "4b4ab6322a1c63c7654f159e7bf95d911bc209b22fefa2390ae55db557ead44f",
+      "after_lf_sha256": "4732981c28380ae1fb20f8a5b4179b24cef842351db54b691881b439773e67cb"
+    },
+    {
+      "path": "webui/blueprints/persona_reviews.py",
+      "before_lf_sha256": "86046a9a36ef61bfdce60ff0c4d0690fc02d7f34f8762cb36e2ffd29217d515c",
+      "after_lf_sha256": "7fc3b9158c0940f19d1c0ed09b0eebc826d2660330243a33ff5d76eb11f679b5"
+    },
+    {
+      "path": "webui/services/learning_service.py",
+      "before_lf_sha256": "cc0c770f617304cd129b4092478134f971e584b7a22f9cf387d2939a176e75c6",
+      "after_lf_sha256": "9bda1db4bde229841535a6796d6318ae366ae055d2ab92992aa11ada51b7c09e"
+    },
+    {
+      "path": "webui/services/metrics_service.py",
+      "before_lf_sha256": "e78813140b316cffcd9b2f63f87ae81db02b38d1ea684b146769eff6adea75d8",
+      "after_lf_sha256": "6224efd67b2a9c08f44f37b935268ffe2af00ff07ec788e5d6dfbfc627c08bb1"
+    },
+    {
+      "path": "webui/services/persona_review_service.py",
+      "before_lf_sha256": "628e183f77ad7f4c9be433da32c40aef947ee268210b528d1c991ae6a684429d",
+      "after_lf_sha256": "52a2dfed30826465e2ab3ba60077c7e992d7f58c0b47a5d9b21630fe4781177c"
+    }
+  ]
+}

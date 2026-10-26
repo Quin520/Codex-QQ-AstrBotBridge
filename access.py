@@ -13,7 +13,11 @@ PUBLIC_PLUGIN_TOOLS = {
         "sing_cover",
         "find_cover_music",
     },
-    "astrbot_plugin_listen_music": {"find_music", "deliver_music", "search_music"},
+    "astrbot_plugin_listen_music": {
+        "find_music", "deliver_music", "search_music",
+        "find_in_bilibili", "deliver_media",
+    },
+    "astrbot_plugin_bili_player": {"find_in_bilibili", "deliver_media"},
     "astrbot_plugin_livingmemory": {"recall_long_term_memory"},
     "astrbot_plugin_music": {"play_song_by_name", "query_lyrics_by_name"},
     "astrbot_plugin_stealer": {"search_meme", "send_meme"},

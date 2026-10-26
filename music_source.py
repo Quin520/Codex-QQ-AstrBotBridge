@@ -7,8 +7,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import NamedTuple
 
-PLUGIN_NAME = "astrbot_plugin_listen_music"
-PLUGIN_MODULES = {f"data.plugins.{PLUGIN_NAME}.main", f"{PLUGIN_NAME}.main"}
+PLUGIN_NAMES = {"astrbot_plugin_listen_music", "astrbot_plugin_bili_player"}
 
 
 class MusicSourceError(RuntimeError):
@@ -53,9 +52,11 @@ async def prepared_song(
         (
             item
             for item in context.get_all_stars()
-            if getattr(item, "name", None) == PLUGIN_NAME
-            and getattr(item, "root_dir_name", None) == PLUGIN_NAME
-            and getattr(item, "module_path", None) in PLUGIN_MODULES
+            if getattr(item, "name", None) in PLUGIN_NAMES
+            and getattr(item, "root_dir_name", None) == item.name
+            and getattr(item, "module_path", None) in {
+                f"data.plugins.{item.name}.main", f"{item.name}.main"
+            }
             and getattr(item, "activated", False)
             and not getattr(item, "reserved", False)
         ),
@@ -81,7 +82,6 @@ async def prepared_song(
                 "_require_media",
             )
         )
-        or not hasattr(module, "VOICE_MEDIA_LIMITS")
     ):
         raise MusicSourceError("听歌插件尚未就绪或版本不兼容，请检查插件加载状态。")
 
@@ -103,9 +103,9 @@ async def prepared_song(
     try:
         try:
             async with asyncio.timeout(200):
-                prepared = await plugin._require_delivery().deliver(
-                    candidate, limits=module.VOICE_MEDIA_LIMITS
-                )
+                # Both supported releases default to the same 25 MiB / 15 min
+                # voice budget; 0.2.x no longer re-exports it from main.py.
+                prepared = await plugin._require_delivery().deliver(candidate)
         except TimeoutError as exc:
             raise MusicSourceError(
                 "歌曲下载超时，尚未生成翻唱，请稍后重新搜索。"

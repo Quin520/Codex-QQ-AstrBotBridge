@@ -1,0 +1,31 @@
+{
+  "upstream_commit": "29500b75937144d6973358321d528ffa329af4b5",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "_conf_schema.json",
+      "before_lf_sha256": "cce2420d74722e95e59e3a4e85db6375fc25875b3a781671ee00a7dc61301348",
+      "after_lf_sha256": "65ae461ed92c67c7630910ea173e299144202407f3742c649f25bab21e43ddb9"
+    },
+    {
+      "path": "core/base/config_validator.py",
+      "before_lf_sha256": "7c20f3708f36653ad62b692729db62a97d172aa3a4e48ebcd051649c8fc61b28",
+      "after_lf_sha256": "c54f4dc46659981fa0753e542030a30c0b10ba08bfcc7c5359e854edbdb02b91"
+    },
+    {
+      "path": "core/memory_scope.py",
+      "before_lf_sha256": "35720e27f868c1fffaeba5e56b87d6eb29154193246653f9a84d025e812eaece",
+      "after_lf_sha256": "c884d44c13587f0b24e03c29a02ab9dcdfbca6b90d29d5fb507f5510cd30e780"
+    },
+    {
+      "path": "core/prompts/group_chat_prompt.txt",
+      "before_lf_sha256": "9e24e3161fff8e976edecc4f8fe9b818c3ab2f7cc7cd0cf1e6f941b507146dfa",
+      "after_lf_sha256": "1360e9ba671f5d84f20edf269230d2a68c6023c101905175acc6918cb8ec248b"
+    },
+    {
+      "path": "tests/test_bridge_memory_scope.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "37436e656f6d4352980a80bab1a591e9c3c426e5588f635e71f8cea2326b9e96"
+    }
+  ]
+}

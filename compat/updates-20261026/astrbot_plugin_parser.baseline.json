@@ -1,0 +1,41 @@
+{
+  "upstream_commit": "e4d4e42a10a32fda98ac6fbcbbc7efbdd85e12d9",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "core/exception.py",
+      "before_lf_sha256": "50a40e2cc9d27f408af2e9a4c0e961b871c0d0ca41654156685f9738b05b996e",
+      "after_lf_sha256": "208ae2bc6ef12d49c79e9191ae78a60865a4a7d475427358a42c39eaaa86dd08"
+    },
+    {
+      "path": "core/parsers/shipinhao.py",
+      "before_lf_sha256": "f94e9da4e8b16792c728a63de7d1920b6d3ec02265f0acdc822d98b783fe2169",
+      "after_lf_sha256": "e14467b112c14c62a515aa78b91c2df956a6865eaf222904dbc61e67b08615cf"
+    },
+    {
+      "path": "core/parsers/xiaoheihe.py",
+      "before_lf_sha256": "a0921822a9dd7d9571751126967725a0b1e6972f5208a04e6efe9f8b79fe9607",
+      "after_lf_sha256": "74ed6fb27429de939a94c5ff7f703d97aa98729a3158495fb12bd4eee3b2d4a7"
+    },
+    {
+      "path": "core/sender.py",
+      "before_lf_sha256": "76298b2a9a48aae36236fbafc7c3f547719c0f49f5329a5fa23ed19b827a1856",
+      "after_lf_sha256": "39536c5f13dcde319a7b2fff26f48b7e946b6b4416d29260012d0424678b5572"
+    },
+    {
+      "path": "core/utils.py",
+      "before_lf_sha256": "fe61075f26ce11b5e854e14e454745669b82aa094cc67b6ca928b240a978eb31",
+      "after_lf_sha256": "9944275dfdf2e1340caa50ce8e1edb6e124a98381f9092c90363488494c5a224"
+    },
+    {
+      "path": "main.py",
+      "before_lf_sha256": "f1f5bd5c551dfcb203dc89280ee88f30b5e150d1d61b89010259f791ab4becd2",
+      "after_lf_sha256": "0c500ae1fa110577acb6b155497ad9dbd4c999aa9e27e053405bbb8e748353c6"
+    },
+    {
+      "path": "tests/test_verification_preview.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "2c16d3e570b7587e3a418b957a2ed6fbe02186b1970727227bfb1f6fe6ecdb10"
+    }
+  ]
+}

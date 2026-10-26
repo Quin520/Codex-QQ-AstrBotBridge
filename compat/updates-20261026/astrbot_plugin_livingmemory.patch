@@ -1,0 +1,304 @@
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -470,11 +470,12 @@
+             },
+             "memory_scope_mode": {
+                 "description": "记忆作用域模式",
+-                "hint": "legacy 保持旧版配置；session 按实际会话隔离；user 让同一平台用户跨私聊和群聊共享；global 全局共享。切换模式不会迁移已有记忆，旧记忆仍留在原作用域；如需召回，请执行 /lmem migrate-scope <target> apply。",
++                "hint": "legacy 保持旧版配置；session 按实际会话隔离；group 让同一平台实例的本群成员共享群内长期记忆，私聊仍独立；user 让同一平台用户跨私聊和群聊共享；global 全局共享。切换模式不会迁移已有记忆，旧记忆仍留在原作用域；迁移时应指定来源，避免混入其他群或私聊。",
+                 "type": "string",
+                 "options": [
+                     "legacy",
+                     "session",
++                    "group",
+                     "user",
+                     "global"
+                 ],
+@@ -482,7 +483,7 @@
+             },
+             "isolated_sessions": {
+                 "description": "强制隔离会话",
+-                "hint": "每行填写一个完整会话 ID。这些会话始终使用独立记忆作用域，不受 user、global 或旧版关闭会话过滤设置影响。",
++                "hint": "每行填写一个完整会话 ID。这些会话始终使用独立记忆作用域，不受 group、user、global 或旧版关闭会话过滤设置影响。",
+                 "type": "text",
+                 "default": ""
+             }
+--- a/core/base/config_validator.py
++++ b/core/base/config_validator.py
+@@ -232,7 +232,7 @@
+     use_persona_filtering: bool = Field(default=True, description="是否使用人格过滤")
+     use_session_filtering: bool = Field(default=True, description="是否使用会话过滤")
+     memory_scope_mode: str = Field(
+-        default="legacy", pattern="^(legacy|session|user|global)$"
++        default="legacy", pattern="^(legacy|session|group|user|global)$"
+     )
+     isolated_sessions: str = Field(default="", description="强制隔离的会话列表")
+ 
+--- a/core/memory_scope.py
++++ b/core/memory_scope.py
+@@ -112,12 +112,19 @@
+     platform = _event_value(event, "get_platform_name", "platform")
+     session_id = _event_value(event, "unified_msg_origin", "unified_msg_origin")
+     group_id = _event_value(event, "get_group_id", "group_id")
++    platform_id = _event_value(event, "get_platform_id", "platform_id")
++    # A canonical group UMO matches every isolated member session while keeping
++    # private users, other groups and other platform instances out of the list.
++    group_scope = (
++        f"{platform_id}:GroupMessage:{group_id}" if platform_id and group_id else ""
++    )
+     identity = resolve_event_identity(config, event)
+     candidates = {
+         sender_id,
+         identity,
+         session_id,
+         group_id,
++        group_scope,
+         f"{platform}:{sender_id}" if platform and sender_id else "",
+     }
+     return any(
+@@ -140,6 +147,14 @@
+         _config_get(config, "filtering_settings.memory_scope_mode", "legacy")
+     ).casefold()
+     if mode == "session":
++        return session_id
++    if mode == "group":
++        group_id = _event_value(event, "get_group_id", "group_id")
++        platform_id = _event_value(event, "get_platform_id", "platform_id")
++        # Share only this group's public memories; private chats and incomplete
++        # events keep their original scope. Never derive identity from user text.
++        if group_id and platform_id:
++            return f"{platform_id}:GroupMessage:{group_id}"
+         return session_id
+     if mode == "global":
+         return GLOBAL_MEMORY_SCOPE
+--- a/core/prompts/group_chat_prompt.txt
++++ b/core/prompts/group_chat_prompt.txt
+@@ -34,6 +34,8 @@
+ 
+ **⚠️ 昵称使用规则**:
+ - 从每条消息的`[昵称 |`或`[Bot: 昵称 |`前缀中提取具体昵称
++- 用消息前缀中的账号 ID 区分成员；同昵称不同 ID 是不同的人，同 ID 改昵称仍是同一个人。关键事实中首次提及成员时使用“昵称（ID: 账号）”，不要把当前提问者当作所有历史发言者。
++- 区分“某人自述”“他人转述”和已确认事实；保留归属，不将玩笑、猜测或单次情绪直接写成成员的长期性格。
+ - 在summary中必须写"张三说..."而不是"用户说..."或"某人说..."
+ - 在key_facts中必须写"张三提出..."而不是"有人提出..."
+ - 在participants中必须列出所有发言者的具体昵称
+--- /dev/null
++++ b/tests/test_bridge_memory_scope.py
+@@ -0,0 +1,217 @@
++"""Verify canonical group allowlists against real isolated AstrBot events."""
++
++import importlib.util
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++from pydantic import ValidationError
++
++_runtime = tempfile.TemporaryDirectory()
++os.environ.setdefault("ASTRBOT_ROOT", _runtime.name)
++
++from astrbot.api.platform import AstrBotMessage, MessageMember, MessageType  # noqa: E402
++from astrbot.core.platform.astr_message_event import AstrMessageEvent  # noqa: E402
++from astrbot.core.platform.platform_metadata import PlatformMetadata  # noqa: E402
++
++source = Path(__file__).resolve().parents[1] / "core/memory_scope.py"
++spec = importlib.util.spec_from_file_location("memory_scope_under_test", source)
++scope = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(scope)
++
++validator_source = source.parent / "base/config_validator.py"
++validator_spec = importlib.util.spec_from_file_location(
++    "memory_config_validator_under_test", validator_source
++)
++validator = importlib.util.module_from_spec(validator_spec)
++sys.modules[validator_spec.name] = validator
++validator_spec.loader.exec_module(validator)
++
++
++def event(sender, group="", platform="test"):
++    message = AstrBotMessage()
++    message.type = MessageType.GROUP_MESSAGE if group else MessageType.FRIEND_MESSAGE
++    message.group_id = group
++    message.sender = MessageMember(user_id=sender, nickname="Fictional member")
++    session = f"{sender}_{group}" if group else sender
++    return AstrMessageEvent(
++        "hello", message, PlatformMetadata("aiocqhttp", "test", platform), session
++    )
++
++
++class CanonicalGroupAllowlistTests(unittest.TestCase):
++    def setUp(self):
++        self.config = {
++            "access_control": {
++                "whitelist_enabled": True,
++                "allowed_ids": "test:GroupMessage:456\ntest:FriendMessage:123",
++            },
++            "filtering_settings": {
++                "memory_scope_mode": "session",
++                "use_session_filtering": True,
++            },
++        }
++
++    def test_both_members_allowed_without_rewriting_isolated_scope(self):
++        for sender in ("123", "999"):
++            current = event(sender, "456")
++            original = current.unified_msg_origin
++            self.assertTrue(scope.is_event_memory_allowed(self.config, current))
++            self.assertEqual(scope.resolve_memory_scope(self.config, current), original)
++            self.assertEqual(
++                current.unified_msg_origin, f"test:GroupMessage:{sender}_456"
++            )
++
++    def test_private_user_sharing_group_number_is_denied(self):
++        self.assertFalse(scope.is_event_memory_allowed(self.config, event("456")))
++
++    def test_same_numbered_member_in_another_group_is_denied(self):
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("456", "777"))
++        )
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("123", "777"))
++        )
++
++    def test_other_instance_of_same_adapter_is_denied(self):
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("999", "456", "other"))
++        )
++        self.assertFalse(
++            scope.is_event_memory_allowed(self.config, event("123", platform="other"))
++        )
++
++    def test_only_owner_private_session_is_allowed(self):
++        current = event("123")
++        self.assertTrue(scope.is_event_memory_allowed(self.config, current))
++        self.assertEqual(
++            scope.resolve_memory_scope(self.config, current), "test:FriendMessage:123"
++        )
++        self.assertFalse(scope.is_event_memory_allowed(self.config, event("999")))
++
++    def test_legacy_bare_ids_still_work_if_explicitly_selected(self):
++        self.config["access_control"]["allowed_ids"] = "456"
++        self.assertTrue(scope.is_event_memory_allowed(self.config, event("999", "456")))
++
++
++class GroupMemoryScopeTests(unittest.TestCase):
++    def setUp(self):
++        self.config = {
++            "filtering_settings": {
++                "memory_scope_mode": "group",
++                "use_session_filtering": True,
++            }
++        }
++
++    def test_same_group_members_share_scope_without_changing_chat_session(self):
++        for sender in ("123", "999"):
++            current = event(sender, "456")
++            self.assertEqual(
++                scope.resolve_memory_scope(self.config, current),
++                "test:GroupMessage:456",
++            )
++            self.assertEqual(
++                current.unified_msg_origin, f"test:GroupMessage:{sender}_456"
++            )
++            self.assertEqual(current.get_sender_id(), sender)
++
++    def test_group_scope_is_identical_for_proactive_group_session(self):
++        current = event("321", "456")
++        current.unified_msg_origin = "test:GroupMessage:456"
++        self.assertEqual(
++            scope.resolve_memory_scope(self.config, current),
++            "test:GroupMessage:456",
++        )
++
++    def test_different_groups_and_platform_instances_remain_isolated(self):
++        scopes = {
++            scope.resolve_memory_scope(self.config, event("123", "456")),
++            scope.resolve_memory_scope(self.config, event("123", "777")),
++            scope.resolve_memory_scope(self.config, event("123", "456", "other")),
++        }
++        self.assertEqual(len(scopes), 3)
++
++    def test_private_scopes_do_not_join_group_or_other_private_users(self):
++        contexts = [
++            event("123"),
++            event("999"),
++            event("456"),
++            event("123", "456"),
++        ]
++        scopes = [scope.resolve_memory_scope(self.config, item) for item in contexts]
++        self.assertEqual(len(set(scopes)), 4)
++        for current, result in zip(contexts[:3], scopes[:3]):
++            self.assertEqual(result, current.unified_msg_origin)
++
++    def test_isolated_member_override_has_priority(self):
++        current = event("123", "456")
++        self.config["filtering_settings"]["isolated_sessions"] = (
++            current.unified_msg_origin
++        )
++        self.assertEqual(
++            scope.resolve_memory_scope(self.config, current),
++            current.unified_msg_origin,
++        )
++        self.assertEqual(
++            scope.resolve_memory_scope(self.config, event("999", "456")),
++            "test:GroupMessage:456",
++        )
++
++    def test_missing_platform_instance_preserves_original_scope(self):
++        current = event("123", "456")
++        with patch.object(current, "get_platform_id", return_value=""):
++            self.assertEqual(
++                scope.resolve_memory_scope(self.config, current),
++                current.unified_msg_origin,
++            )
++        with patch.object(current, "get_platform_id", side_effect=RuntimeError):
++            self.assertEqual(
++                scope.resolve_memory_scope(self.config, current),
++                current.unified_msg_origin,
++            )
++
++    def test_missing_group_preserves_original_scope(self):
++        current = event("123", "456")
++        with patch.object(current, "get_group_id", return_value=""):
++            self.assertEqual(
++                scope.resolve_memory_scope(self.config, current),
++                current.unified_msg_origin,
++            )
++
++    def test_group_id_is_not_parsed_from_underscore_delimited_session(self):
++        current = event("123", "guild_channel_456")
++        self.assertEqual(
++            scope.resolve_memory_scope(self.config, current),
++            "test:GroupMessage:guild_channel_456",
++        )
++
++    def test_legacy_session_user_and_global_modes_keep_their_semantics(self):
++        current = event("123", "456")
++        expected = {
++            "legacy": current.unified_msg_origin,
++            "session": current.unified_msg_origin,
++            "user": "livingmemory:user:aiocqhttp:123",
++            "global": scope.GLOBAL_MEMORY_SCOPE,
++        }
++        for mode, target in expected.items():
++            with self.subTest(mode=mode):
++                self.config["filtering_settings"]["memory_scope_mode"] = mode
++                self.assertEqual(
++                    scope.resolve_memory_scope(self.config, current), target
++                )
++
++    def test_group_mode_passes_configuration_validation(self):
++        parsed = validator.FilteringConfig(memory_scope_mode="group")
++        self.assertEqual(parsed.memory_scope_mode, "group")
++        self.assertEqual(validator.FilteringConfig().memory_scope_mode, "legacy")
++
++    def test_configuration_still_rejects_unknown_scope_modes(self):
++        with self.assertRaises(ValidationError):
++            validator.FilteringConfig(memory_scope_mode="unknown")
++
++
++if __name__ == "__main__":
++    unittest.main()

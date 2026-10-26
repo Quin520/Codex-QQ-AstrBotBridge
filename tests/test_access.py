@@ -79,6 +79,8 @@ class AccessTests(unittest.IsolatedAsyncioTestCase):
         event = event_for("play music", "999", "456", "321")
         for name, module, expected in [
             ("find_music", "data.plugins.astrbot_plugin_listen_music.main", True),
+            ("find_in_bilibili", "data.plugins.astrbot_plugin_listen_music.main", True),
+            ("deliver_media", "data.plugins.astrbot_plugin_listen_music.main", True),
             ("execute_shell", "data.plugins.astrbot_plugin_listen_music.main", False),
             ("find_music", "data.plugins.example.main", False),
             ("astrbot_file_read_tool", "astrbot.core.tools.computer_tools.fs", False),

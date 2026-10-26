@@ -1,0 +1,21 @@
+{
+  "upstream_commit": "9022a710aa85bd0287978384be6efa72c3eabdd1",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "core/platform/base.py",
+      "before_lf_sha256": "fb9b658da3250c7ce60c17fb1dd0db40b77927e5f959a5e5d7d268bc9c0e3060",
+      "after_lf_sha256": "4b600523daa44985e03b8d64cf4bc1801fbfdcd890a59e0e139963d36fc7b786"
+    },
+    {
+      "path": "main.py",
+      "before_lf_sha256": "b8bd60514d28e13eb206aaddad7c5e784f32efb0124b76b7fd39051b0a3ac6da",
+      "after_lf_sha256": "08b8faa025d3a0cddf40c0df28e6c927f0661fc661719b387e063a9b6f21a50d"
+    },
+    {
+      "path": "tests/test_bridge_music_compat.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "661b99f125b1e7723fb7554ab62a1908d1a40930bbae07564ba0ef1e444bbad3"
+    }
+  ]
+}

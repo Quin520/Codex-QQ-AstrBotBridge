@@ -82,7 +82,7 @@ class MusicSourceTests(unittest.IsolatedAsyncioTestCase):
             search_id="search-fixture", session_id=self.event.unified_msg_origin
         )
         self.delivery.deliver.assert_awaited_once_with(
-            self.candidate, limits=self.module.VOICE_MEDIA_LIMITS
+            self.candidate
         )
 
     async def test_consumer_failure_still_releases_original_media(self):

@@ -1,0 +1,66 @@
+{
+  "upstream_commit": "c9f16bd99df83b50f5f307262bf989cd87ed5c30",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "core/accounts.py",
+      "before_lf_sha256": "bf8bd841e1293b1930f3ad57549e9e1383a95840600c04404794d06fb8db746b",
+      "after_lf_sha256": "b3f630be13e403c57c85ad4ae14ad072b0a21246b53fa5a6030a645e9f2e6087"
+    },
+    {
+      "path": "core/bilibili.py",
+      "before_lf_sha256": "0f0f7be98f1caa6704dc8ebd54b07c2de6174269409f885cb83ede20ae7cf463",
+      "after_lf_sha256": "b889895f1a3aadd89d2fe0439d612612844ddce51911c45913f51a54e9a3c5a9"
+    },
+    {
+      "path": "core/services.py",
+      "before_lf_sha256": "6b2e3053182477a95c1b472429620b1d30a7924e62ac3fbc682e3548284b2d97",
+      "after_lf_sha256": "975fc2a6424209e9bd874be9fcb182c769fec5c1f6eaaa2ae382a7c669823e51"
+    },
+    {
+      "path": "main.py",
+      "before_lf_sha256": "d79d4f8cf3f7ae19d7a30aa1b6d6473692110662cf1d00c6d3b2592372487672",
+      "after_lf_sha256": "066645cda138872fd5b33ae1356b73b7fc9f9dc162ab2d3d35dcf4605666ff16"
+    },
+    {
+      "path": "metadata.yaml",
+      "before_lf_sha256": "0b1b06ac9b602a92f8898be0f026f6456beafefc830c637ed0c3d12d8ca3cf23",
+      "after_lf_sha256": "247773b2fe677e5fca154243061fa1e899f113b07938115b62f909e4b5967f4c"
+    },
+    {
+      "path": "tests/test_accounts.py",
+      "before_lf_sha256": "5af86586489a8116fcbf52e0e73f86b1aaa409f25ec53a147db49eb0de4bed9c",
+      "after_lf_sha256": "005d4bf0eb459ee2bdd16353cc6ca1941f8812c3114030f16457d30021518cd4"
+    },
+    {
+      "path": "tests/test_bilibili.py",
+      "before_lf_sha256": "a69beaae44206166b1c504043ec246457bc3419cd25acf8336bf4d64eeb063fe",
+      "after_lf_sha256": "55ba79dd4769d7c19176ac1e88a3d200d30337002b592262bdb3b2cbe4d0ebda"
+    },
+    {
+      "path": "tests/test_main.py",
+      "before_lf_sha256": "ff383fdce67bebd60844b6de45b880dec1ecf7d643e0e37f44387f9ad1d6ce0f",
+      "after_lf_sha256": "b0b24eaf4f8323460309f52be4c4c7903d0a1e88426d79b390029f67bc41d16b"
+    },
+    {
+      "path": "tests/test_media.py",
+      "before_lf_sha256": "62b7067ba8ca07112f8b25416daf5e94c95bcdead5d671a8b1a48ffc4c6c50dc",
+      "after_lf_sha256": "e302c1b9674782cdbfbe326087b6c61b1120202708fc33f01e65b1343a8c90d3"
+    },
+    {
+      "path": "tests/test_services.py",
+      "before_lf_sha256": "0bf52e7955198d6c381381d2502a592ef6a09df94a3dce3d89aabcd7c9c6ac96",
+      "after_lf_sha256": "24d2b4ed3658544d8b2cfbc6453ca1306046e772cb0964e9ed6cc78d7263c011"
+    },
+    {
+      "path": "tests/test_settings.py",
+      "before_lf_sha256": "f27450838851f6e63af2f688d32e55d3656929cee9cd9fdf3cb495f0ac32acee",
+      "after_lf_sha256": "05e03bf1ae431b809417216668cb1d468d2486ea1b19f3186916a9a1a7c83580"
+    },
+    {
+      "path": "tests/test_windows_credentials.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "c425229dc51699b45a4da90a06b2402a8d4e61aad46536a03b649dbe923a7ffb"
+    }
+  ]
+}

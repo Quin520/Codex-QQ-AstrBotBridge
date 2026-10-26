@@ -225,7 +225,7 @@ class LocalCodex(Star):
             req.system_prompt += (
                 "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_cover_music，"
                 "再将本次候选的 search_id、position 交给 sing_cover。"
-                "普通点歌优先用已提供的 play_song_by_name（默认平台），没有该工具时用 deliver_music。"
+                "普通点歌优先用已提供的 play_song_by_name（默认平台）；Bilibili 使用 find_in_bilibili 搜索后用 deliver_media 发送，旧版对应 find_music 和 deliver_music。"
                 "find_cover_music 会在允许时尝试备用点歌音源；不要用播放原曲的工具代替翻唱。"
                 "用户给了 B 站链接或 BV/AV 时，find_cover_music 的 title 直接填写该链接或编号，"
                 "不要把确切链接改成模糊歌名再搜索。接口受限不代表音源不存在，应如实说明。"

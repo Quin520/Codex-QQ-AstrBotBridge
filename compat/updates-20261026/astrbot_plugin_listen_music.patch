@@ -1,0 +1,1156 @@
+--- a/core/accounts.py
++++ b/core/accounts.py
+@@ -8,10 +8,12 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import csv
+ import json
+ import os
+ import re
+ import secrets
++import subprocess
+ import tempfile
+ import time
+ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+@@ -246,7 +248,42 @@
+                 prefix=f".{self.path.name}.", suffix=".tmp", dir=self.path.parent
+             )
+             temporary_path = Path(temporary_name)
+-            os.fchmod(file_descriptor, 0o600)
++            if os.name == "nt":
++                # Protect the empty file before writing credentials. Windows
++                # chmod only controls read-only flags, not access permissions.
++                system_directory = Path(os.environ["SystemRoot"]) / "System32"
++                identity = subprocess.run(
++                    [str(system_directory / "whoami.exe"), "/user", "/fo", "csv", "/nh"],
++                    check=True,
++                    capture_output=True,
++                    timeout=10,
++                    creationflags=subprocess.CREATE_NO_WINDOW,
++                )
++                rows = list(
++                    csv.reader(
++                        identity.stdout.decode("utf-8", errors="replace").splitlines()
++                    )
++                )
++                sid = rows[-1][-1].strip() if rows and rows[-1] else ""
++                if not re.fullmatch(r"S-1-\d+(?:-\d+)+", sid):
++                    raise CredentialStoreError(
++                        "Cannot identify the Windows credential owner."
++                    )
++                subprocess.run(
++                    [
++                        str(system_directory / "icacls.exe"),
++                        str(temporary_path),
++                        "/inheritance:r",
++                        "/grant:r",
++                        f"*{sid}:(F)",
++                    ],
++                    check=True,
++                    capture_output=True,
++                    timeout=10,
++                    creationflags=subprocess.CREATE_NO_WINDOW,
++                )
++            else:
++                os.fchmod(file_descriptor, 0o600)
+             with os.fdopen(file_descriptor, "wb") as file:
+                 file_descriptor = None
+                 file.write(payload)
+@@ -254,8 +291,9 @@
+                 os.fsync(file.fileno())
+             os.replace(temporary_path, self.path)
+             temporary_path = None
+-            os.chmod(self.path, 0o600)
+-        except OSError as exc:
++            if os.name != "nt":
++                os.chmod(self.path, 0o600)
++        except (OSError, subprocess.SubprocessError) as exc:
+             raise CredentialStoreError("账号凭证文件无法保存") from exc
+         finally:
+             if file_descriptor is not None:
+--- a/core/bilibili.py
++++ b/core/bilibili.py
+@@ -20,7 +20,7 @@
+ from collections.abc import Awaitable, Callable, Mapping
+ from dataclasses import dataclass
+ from typing import Any, Literal, TypeAlias
+-from urllib.parse import parse_qsl, quote, urlencode, urlsplit
++from urllib.parse import SplitResult, parse_qsl, quote, urlencode, urljoin, urlsplit
+ 
+ import aiohttp
+ 
+@@ -127,6 +127,10 @@
+     r")(?![0-9A-Za-z])",
+     re.IGNORECASE,
+ )
++_REFERENCE_URL_RE = re.compile(r"[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
++_REFERENCE_HOSTS = frozenset(
++    {"b23.tv", "bilibili.com", "www.bilibili.com", "m.bilibili.com"}
++)
+ 
+ CookieMap: TypeAlias = Mapping[str, str]
+ CookieGetter: TypeAlias = Callable[[], CookieMap | Awaitable[CookieMap | None] | None]
+@@ -135,6 +139,14 @@
+ 
+ class BilibiliError(RuntimeError):
+     """Raised when a Bilibili response cannot be used safely."""
++
++
++class BilibiliHttpError(BilibiliError):
++    """An HTTP failure whose status can be reported without exposing URLs."""
++
++    def __init__(self, status: int) -> None:
++        self.status = status
++        super().__init__(f"Bilibili request failed (HTTP {status})")
+ 
+ 
+ class BilibiliApiError(BilibiliError):
+@@ -183,6 +195,13 @@
+ 
+     if not isinstance(value, str):
+         return ()
++    # Validate URL hosts before extracting IDs; do not treat an arbitrary URL
++    # containing a BV token as a trusted video, or scan tracking query strings.
++    def validated_path(match: re.Match[str]) -> str:
++        parsed = _validate_reference_url(match.group().rstrip("。，,!?！?）)"))
++        return " " if parsed.hostname == "b23.tv" else parsed.path
++
++    value = _REFERENCE_URL_RE.sub(validated_path, value)
+     refs: list[BilibiliVideoRef] = []
+     seen: set[tuple[str, int | None]] = set()
+     for match in _VIDEO_REF_TOKEN_RE.finditer(value):
+@@ -207,13 +226,72 @@
+ def parse_bilibili_video_ref(value: str | None) -> BilibiliVideoRef | None:
+     """Extract the first literal AV or BV identifier from user-supplied text.
+ 
+-    This is deliberately a pure parser.  Standard ``bilibili.com/video`` URLs
+-    work because their literal AV/BV token is extracted; ``b23.tv`` links are
+-    not followed or otherwise resolved.
++    Only approved video URLs and standalone IDs are accepted. Short links are
++    validated here but resolved separately, without visiting the landing page.
+     """
+ 
+     refs = parse_bilibili_video_refs(value)
+     return refs[0] if refs else None
++
++
++def _validate_reference_url(value: str) -> SplitResult:
++    """Validate a reference before any network request or identifier extraction.
++
++    Args:
++        value: Complete URL from user input or a short-link Location header.
++
++    Returns:
++        Parsed URL restricted to approved hosts and video/reference paths.
++
++    Raises:
++        ValueError: If the URL is not an approved public Bilibili reference.
++    """
++    try:
++        parsed = urlsplit(value)
++        if (
++            parsed.scheme not in {"http", "https"}
++            or parsed.hostname not in _REFERENCE_HOSTS
++            or parsed.username is not None
++            or parsed.password is not None
++            or parsed.port is not None
++            or "\\" in value
++            or any(ord(char) < 32 for char in value)
++        ):
++            raise ValueError
++        pattern = (
++            r"/[A-Za-z0-9]{1,32}/?"
++            if parsed.hostname == "b23.tv"
++            else r"/video/(?:BV[0-9A-Za-z]{10}|av[1-9][0-9]{0,18})/?"
++        )
++        if re.fullmatch(pattern, parsed.path, re.IGNORECASE) is None:
++            raise ValueError
++    except ValueError as exc:
++        raise ValueError(
++            "仅支持合法的 Bilibili 视频链接或 b23.tv 短链接（不支持端口或账号信息）"
++        ) from exc
++    return parsed
++
++
++def parse_bilibili_short_url(value: str) -> str | None:
++    """Return a validated short link, dropping tracking parameters.
++
++    Args:
++        value: User-supplied text containing an optional short link.
++
++    Returns:
++        An HTTPS b23.tv URL, or None when no short link exists.
++
++    Raises:
++        ValueError: If an embedded URL is not an approved reference.
++    """
++    urls = [
++        _validate_reference_url(url.rstrip("。，,!?！?）)"))
++        for url in _REFERENCE_URL_RE.findall(value)
++    ]
++    for parsed in urls:
++        if parsed.hostname == "b23.tv":
++            return f"https://b23.tv{parsed.path}"
++    return None
+ 
+ 
+ @dataclass(frozen=True, slots=True)
+@@ -458,6 +536,10 @@
+         self._wbi_lock = asyncio.Lock()
+         self._qr_sessions: dict[str, _PendingQrLogin] = {}
+         self._qr_lock = asyncio.Lock()
++        self._detail_semaphore = asyncio.Semaphore(1)
++        self._detail_cache: dict[tuple[str, str], tuple[float, BilibiliVideo]] = {}
++        self._detail_next_request = 0.0
++        self._detail_limited_until = 0.0
+ 
+     async def search_videos(
+         self, query: str, *, limit: int = 20
+@@ -504,15 +586,93 @@
+     async def get_video(self, bvid: str) -> BilibiliVideo:
+         """Fetch a video's current page list for matching and audio resolution."""
+         normalized_bvid = _normalise_bvid(bvid)
+-        data = await self._wbi_data(_VIEW_URL, {"bvid": normalized_bvid})
+-        return self._parse_video_detail(data, fallback_bvid=normalized_bvid)
++        return await self._get_video_detail({"bvid": normalized_bvid})
+ 
+     async def get_video_by_aid(self, aid: int) -> BilibiliVideo:
+         """Fetch video detail by AV ID and retain Bilibili's canonical BV ID."""
+         if isinstance(aid, bool) or not isinstance(aid, int) or aid <= 0:
+             raise ValueError("aid must be a positive integer")
+-        data = await self._wbi_data(_VIEW_URL, {"aid": aid})
+-        return self._parse_video_detail(data, fallback_bvid=None)
++        return await self._get_video_detail({"aid": aid})
++
++    async def _get_video_detail(self, params: Mapping[str, Any]) -> BilibiliVideo:
++        """Share a bounded detail cache and request budget across all searches.
++
++        Args:
++            params: One validated BV or AV identifier.
++
++        Returns:
++            Current video details, cached for at most 60 seconds.
++
++        Raises:
++            BilibiliError: If the upstream request fails or is temporarily limited.
++        """
++        key = next((name, str(value)) for name, value in params.items())
++        async with self._detail_semaphore:
++            now = time.monotonic()
++            cached = self._detail_cache.get(key)
++            if cached is not None and cached[0] > now:
++                return cached[1]
++            if now < self._detail_limited_until:
++                raise BilibiliHttpError(412)
++            await asyncio.sleep(max(0.0, self._detail_next_request - now))
++            try:
++                data = await self._wbi_data(_VIEW_URL, params)
++            except BilibiliHttpError as exc:
++                if exc.status == 412:
++                    self._detail_limited_until = time.monotonic() + 5.0
++                raise
++            finally:
++                self._detail_next_request = time.monotonic() + 0.2
++            video = self._parse_video_detail(data, fallback_bvid=params.get("bvid"))
++            self._detail_cache = {
++                entry: item
++                for entry, item in self._detail_cache.items()
++                if item[0] > time.monotonic()
++            }
++            if len(self._detail_cache) >= 128:
++                self._detail_cache.pop(next(iter(self._detail_cache)))
++            self._detail_cache[key] = (time.monotonic() + 60.0, video)
++            return video
++
++    async def resolve_short_link(self, value: str) -> BilibiliVideoRef:
++        """Read bounded, validated redirects without loading the video webpage.
++
++        Args:
++            value: An approved b23.tv reference URL.
++
++        Returns:
++            The exact video reference from the final Location header.
++
++        Raises:
++            BilibiliError: If resolution fails or redirects outside approved hosts.
++        """
++        try:
++            url = parse_bilibili_short_url(value)
++            if url is None:
++                raise ValueError("请提供合法的 b23.tv 短链接")
++            for _ in range(3):
++                async with self._session.get(
++                    url, headers=self._headers(), allow_redirects=False
++                ) as response:
++                    if response.status not in {301, 302, 303, 307, 308}:
++                        raise BilibiliHttpError(response.status)
++                    location = response.headers.get("Location", "")
++                    if not location:
++                        raise BilibiliError(
++                            "Bilibili short link has no redirect target"
++                        )
++                    target = urljoin(url, location)
++                    parsed = _validate_reference_url(target)
++                    if parsed.hostname != "b23.tv":
++                        reference = parse_bilibili_video_ref(target)
++                        if reference is not None:
++                            return reference
++                    url = f"https://b23.tv{parsed.path}"
++            raise BilibiliError("Bilibili short link exceeded the redirect limit")
++        except (ValueError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
++            raise BilibiliError(
++                "Bilibili 短链接解析失败：链接无效或网络暂时不可用"
++            ) from exc
+ 
+     @staticmethod
+     def _parse_video_detail(
+@@ -873,9 +1033,7 @@
+             ) as response:
+                 text = await response.text()
+                 if response.status >= 400:
+-                    raise BilibiliError(
+-                        f"Bilibili request failed (HTTP {response.status})"
+-                    )
++                    raise BilibiliHttpError(response.status)
+                 try:
+                     payload = json.loads(text)
+                 except json.JSONDecodeError as exc:
+--- a/core/services.py
++++ b/core/services.py
+@@ -9,13 +9,21 @@
+ from __future__ import annotations
+ 
+ import asyncio
++import logging
+ from collections.abc import Sequence
+ from dataclasses import dataclass
+ import re
+ from typing import Any, Protocol
+ import unicodedata
+ 
+-from .bilibili import BilibiliVideoRef
++from .bilibili import (
++    BilibiliApiError,
++    BilibiliError,
++    BilibiliHttpError,
++    BilibiliVideoRef,
++    parse_bilibili_short_url,
++    parse_bilibili_video_ref,
++)
+ from .matcher import filter_bilibili_candidates, prepare_bilibili_search_query
+ from .media import (
+     FfmpegUnavailableError,
+@@ -34,6 +42,7 @@
+ BILIBILI_VIDEO_LIMIT = 12
+ BILIBILI_DETAIL_CONCURRENCY = 4
+ BILIBILI_PAGE_LIMIT = 48
++logger = logging.getLogger(__name__)
+ 
+ 
+ class MusicSearchError(RuntimeError):
+@@ -69,6 +78,8 @@
+ 
+ 
+ class _BilibiliClient(Protocol):
++    async def resolve_short_link(self, value: str) -> BilibiliVideoRef: ...
++
+     async def search_videos(
+         self, query: str, *, limit: int = BILIBILI_VIDEO_LIMIT
+     ) -> Sequence[Any]: ...
+@@ -125,6 +136,20 @@
+         if not session_id.strip():
+             raise ValueError("session_id must not be blank")
+ 
++        if video_ref is None and not fuzzy_query:
++            try:
++                video_ref = parse_bilibili_video_ref(query)
++                short_url = (
++                    parse_bilibili_short_url(query) if video_ref is None else None
++                )
++                if short_url is not None:
++                    video_ref = await self._bilibili.resolve_short_link(short_url)
++            except ValueError as exc:
++                raise MusicSearchError(str(exc)) from exc
++            except BilibiliError as exc:
++                raise MusicSearchError(
++                    _source_failure_message(exc, "短链接解析")
++                ) from exc
+         if video_ref is None:
+             requested_query, candidates = await self._filtered_candidates(
+                 query,
+@@ -185,6 +210,8 @@
+             except MusicSearchError:
+                 # The second query improves recall only; a source failure must
+                 # never discard usable candidates from the primary query.
++                if not filtered:
++                    raise
+                 fallback_candidates = ()
+             filtered = _merge_candidates(
+                 filtered,
+@@ -213,11 +240,12 @@
+                 limit=BILIBILI_VIDEO_LIMIT,
+             )
+         except Exception as exc:
+-            raise MusicSearchError("Bilibili 搜索暂时不可用，请稍后重试") from exc
++            raise MusicSearchError(_source_failure_message(exc, "搜索")) from exc
+         if not videos:
+             return ()
+ 
+         semaphore = asyncio.Semaphore(BILIBILI_DETAIL_CONCURRENCY)
++        failures: list[Exception] = []
+ 
+         async def fetch(video: Any) -> Any | None:
+             bvid = str(getattr(video, "bvid", "")).strip()
+@@ -226,10 +254,22 @@
+             try:
+                 async with semaphore:
+                     return await self._bilibili.get_video(bvid)
+-            except Exception:
++            except Exception as exc:
++                failures.append(exc)
+                 return None
+ 
+         detailed = await asyncio.gather(*(fetch(video) for video in videos))
++        if failures:
++            logger.warning(
++                "Bilibili video details failed for %d/%d search results (%s)",
++                len(failures),
++                len(videos),
++                f"{type(failures[0]).__name__}, status={getattr(failures[0], 'status', 'unknown')}",
++            )
++            if all(video is None for video in detailed):
++                raise MusicSearchError(
++                    _source_failure_message(failures[0], "视频详情获取")
++                ) from failures[0]
+         candidates: list[BilibiliCandidate] = []
+         for search_hit, video in zip(videos, detailed):
+             if video is None:
+@@ -244,6 +284,10 @@
+             )
+             if len(candidates) >= BILIBILI_PAGE_LIMIT:
+                 return tuple(candidates[:BILIBILI_PAGE_LIMIT])
++        if not candidates and failures:
++            raise MusicSearchError(
++                _source_failure_message(failures[0], "视频详情获取")
++            ) from failures[0]
+         return tuple(candidates)
+ 
+     async def _reference_candidates(
+@@ -261,7 +305,10 @@
+                 assert video_ref.aid is not None
+                 video = await self._bilibili.get_video_by_aid(video_ref.aid)
+         except Exception as exc:
+-            raise MusicSearchError("无法打开指定的 Bilibili 视频") from exc
++            raise MusicSearchError(
++                "无法打开指定的 Bilibili 视频："
++                + _source_failure_message(exc, "详情获取")
++            ) from exc
+         return _expand_video_candidates(
+             video,
+             search_title=str(getattr(video, "title", "")).strip(),
+@@ -355,6 +402,25 @@
+         except Exception as exc:
+             raise DeliveryError("Bilibili 未返回可播放视频") from exc
+         return DeliveryResult(candidate=candidate, media=media)
++
++def _source_failure_message(exc: Exception, operation: str) -> str:
++    """Describe upstream failures without leaking request URLs or credentials.
++
++    Args:
++        exc: Underlying request failure.
++        operation: Short operation label for the user.
++
++    Returns:
++        A retryable source error, distinct from an empty song catalogue.
++    """
++    if isinstance(exc, BilibiliHttpError):
++        if exc.status in {403, 412, 429}:
++            return f"Bilibili {operation}暂时受限（HTTP {exc.status}），请稍后重试；这不代表没有音源"
++        return f"Bilibili {operation}失败（HTTP {exc.status}），请稍后重试"
++    if isinstance(exc, BilibiliApiError):
++        return f"Bilibili {operation}暂时不可用（接口代码 {exc.code}），请稍后重试"
++    return f"Bilibili {operation}暂时不可用，请稍后重试"
++
+ 
+ 
+ def format_search_results(
+--- a/main.py
++++ b/main.py
+@@ -66,7 +66,8 @@
+ )
+ 
+ 
+-PLUGIN_NAME = "astrbot_plugin_bili_player"
++# Keep the installed identity and credential directory across the upstream rename.
++PLUGIN_NAME = "astrbot_plugin_listen_music"
+ INTERACTION_TIMEOUT_SECONDS = 90
+ SEARCH_SNAPSHOT_TTL_SECONDS = 300.0
+ SEARCH_SNAPSHOT_MAX_ENTRIES = 1024
+@@ -284,7 +285,7 @@
+         "properties": {
+             "title": {
+                 "type": "string",
+-                "description": "作品名；“唱首歌”时先选定一首具体歌曲。",
++                "description": "具体歌曲名，或用户提供的 Bilibili 视频链接、b23.tv 短链接、BV/AV号；有链接时原样填写链接，不要重新猜歌名。",
+             },
+             "artist": {
+                 "type": "string",
+@@ -313,7 +314,7 @@
+             name="find_in_bilibili",
+             description=(
+                 "本插件是 Bilibili 视频/音频输出工具。当用户想通过聊天看视频、听歌、点歌、播放某首歌或下载音频时，必须先调用本工具；不要自己发送链接或仅用文字描述媒体。"
+-                "适用示例：我要看晴天、我想听周杰伦、来一首、唱首歌、下载这首歌。title 必须是纯作品名——去掉“我要看/我要听/播放”等指令词，也不要附加“原版/无损”等偏好词；可选传歌手和版本偏好。"
++                "适用示例：我要看晴天、我想听周杰伦、来一首、唱首歌、下载这首歌。用户提供 Bilibili 视频链接、b23.tv 短链接或 BV/AV号时，原样放入 title 精确解析，不要重新猜歌名；否则 title 使用纯作品名——去掉“我要看/我要听/播放”等指令词，也不要附加“原版/无损”等偏好词；可选传歌手和版本偏好。"
+                 "delivery：auto=用户未明确看/听/下载（如只说“播放/来一首”），交给插件配置；video=明确要看/视频；audio=明确要听/唱/音频；download=下载音频，后续必须让用户选择。"
+                 "本工具只搜索候选，不向用户发送内容；成功后调用 deliver_media 完成实际发送。只能使用返回的 search_id 和 position。"
+                 "候选评估：作品名精确或完整匹配优先，歌手线索佐证，必须遵守版本偏好；Live/翻唱/AI/DJ/伴奏/MV 等标签仅作证据。"
+--- a/metadata.yaml
++++ b/metadata.yaml
+@@ -1,4 +1,4 @@
+-name: astrbot_plugin_bili_player
++name: astrbot_plugin_listen_music
+ display_name: bili播放器
+ desc: Bilibili 单源搜索、语音听歌、看视频与文件下载。
+ short_desc: bili播放器！用 Bilibili 找歌、看视频并发送可播放媒体。
+--- a/tests/test_accounts.py
++++ b/tests/test_accounts.py
+@@ -1,6 +1,7 @@
+ from __future__ import annotations
+ 
+ import json
++import os
+ from pathlib import Path
+ import stat
+ import sys
+@@ -28,7 +29,7 @@
+ 
+ class AccountServiceTests(unittest.IsolatedAsyncioTestCase):
+     def setUp(self) -> None:
+-        self.directory = tempfile.TemporaryDirectory(dir="/tmp")
++        self.directory = tempfile.TemporaryDirectory()
+         self.path = Path(self.directory.name) / "accounts.json"
+ 
+     def tearDown(self) -> None:
+@@ -95,7 +96,17 @@
+             stored = json.loads(self.path.read_text(encoding="utf-8"))
+             self.assertEqual(set(stored), {"version", "bilibili"})
+             self.assertEqual(stored["bilibili"]["cookies"], {"SESSDATA": "secret"})
+-            self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
++            if os.name == "nt":
++                import win32security
++
++                security = win32security.GetNamedSecurityInfo(
++                    str(self.path), win32security.SE_FILE_OBJECT,
++                    win32security.DACL_SECURITY_INFORMATION,
++                )
++                self.assertEqual(security.GetSecurityDescriptorDacl().GetAceCount(), 1)
++                self.assertTrue(security.GetSecurityDescriptorControl()[0] & win32security.SE_DACL_PROTECTED)
++            else:
++                self.assertEqual(stat.S_IMODE(self.path.stat().st_mode), 0o600)
+         finally:
+             await service.aclose()
+ 
+--- a/tests/test_bilibili.py
++++ b/tests/test_bilibili.py
+@@ -1,5 +1,6 @@
+ from __future__ import annotations
+ 
++import asyncio
+ from pathlib import Path
+ import sys
+ import unittest
+@@ -17,6 +18,8 @@
+ 
+ from core.bilibili import (
+     BilibiliClient,
++    BilibiliError,
++    BilibiliHttpError,
+     BilibiliVideoRef,
+     _DashAudioTrack,
+     _DashVideoTrack,
+@@ -28,6 +31,18 @@
+ 
+ 
+ class BilibiliVideoRefTests(unittest.TestCase):
++    def test_untrusted_url_cannot_smuggle_a_video_id(self) -> None:
++        for value in (
++            "https://example.com/video/BV1Q541167Qg",
++            "https://www.bilibili.com:443/video/BV1Q541167Qg",
++            "https://name@www.bilibili.com/video/BV1Q541167Qg",
++            "https://www.bilibili.com.evil.test/video/BV1Q541167Qg",
++            "https://127.0.0.1/video/BV1Q541167Qg",
++            "ftp://www.bilibili.com/video/BV1Q541167Qg",
++        ):
++            with self.subTest(value=value), self.assertRaises(ValueError):
++                parse_bilibili_video_ref(value)
++
+     def test_parse_accepts_literal_ids_and_standard_video_urls(self) -> None:
+         bvid = "BV1Q541167Qg"
+         cases = (
+@@ -209,6 +224,188 @@
+ 
+ 
+ class BilibiliProtocolTests(unittest.IsolatedAsyncioTestCase):
++    async def test_untrusted_short_link_input_is_rejected_without_network(self) -> None:
++        class Session:
++            def get(self, *_args, **_kwargs):
++                raise AssertionError("invalid short links must not perform requests")
++
++        for value in (
++            "https://evil.test/path",
++            "https://b23.tv:443/path",
++            "https://user@b23.tv/path",
++            "http://127.0.0.1/path",
++        ):
++            with self.subTest(value=value), self.assertRaises(BilibiliError):
++                await BilibiliClient(Session()).resolve_short_link(value)
++
++    async def test_real_http_412_is_preserved_as_typed_source_error(self) -> None:
++        class Response:
++            status = 412
++
++            async def text(self):
++                return "request blocked"
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            def get(self, *_args, **_kwargs):
++                return Response()
++
++        with self.assertRaises(BilibiliHttpError) as error:
++            await BilibiliClient(Session())._request_json(
++                "https://api.bilibili.com/example"
++            )
++        self.assertEqual(error.exception.status, 412)
++
++    async def test_short_link_only_reads_redirect_and_never_visits_landing_page(
++        self,
++    ) -> None:
++        class Response:
++            status = 302
++            headers = {
++                "Location": "https://www.bilibili.com/video/BV1Q541167Qg/?share_source=copy"
++            }
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            def __init__(self):
++                self.calls = []
++
++            def get(self, url, **kwargs):
++                self.calls.append((url, kwargs))
++                return Response()
++
++        session = Session()
++        client = BilibiliClient(session)
++        result = await client.resolve_short_link(
++            "https://b23.tv/Example?share_source=copy"
++        )
++        self.assertEqual(result, BilibiliVideoRef(bvid="BV1Q541167Qg"))
++        self.assertEqual(len(session.calls), 1)
++        self.assertEqual(session.calls[0][0], "https://b23.tv/Example")
++        self.assertFalse(session.calls[0][1]["allow_redirects"])
++        self.assertNotIn("Cookie", session.calls[0][1]["headers"])
++
++    async def test_short_link_rejects_untrusted_redirects_before_requesting_them(
++        self,
++    ) -> None:
++        class Response:
++            status = 302
++
++            def __init__(self, target):
++                self.headers = {"Location": target}
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            def __init__(self, target):
++                self.target = target
++                self.calls = []
++
++            def get(self, url, **_kwargs):
++                self.calls.append(url)
++                return Response(self.target)
++
++        for target in (
++            "http://127.0.0.1/private",
++            "https://example.com/video/BV1Q541167Qg",
++            "https://name@www.bilibili.com/video/BV1Q541167Qg",
++            "https://b23.tv:443/abc",
++            "//169.254.169.254/latest/meta-data",
++            "https://www.bilibili.com\\@127.0.0.1/video/BV1Q541167Qg",
++        ):
++            with self.subTest(target=target):
++                session = Session(target)
++                with self.assertRaises(BilibiliError):
++                    await BilibiliClient(session).resolve_short_link(
++                        "https://b23.tv/Example"
++                    )
++                self.assertEqual(session.calls, ["https://b23.tv/Example"])
++
++    async def test_short_link_loop_is_bounded(self) -> None:
++        class Response:
++            status = 302
++            headers = {"Location": "/Example"}
++
++            async def __aenter__(self):
++                return self
++
++            async def __aexit__(self, *_args):
++                pass
++
++        class Session:
++            calls = 0
++
++            def get(self, *_args, **_kwargs):
++                self.calls += 1
++                return Response()
++
++        session = Session()
++        with self.assertRaisesRegex(BilibiliError, "redirect limit"):
++            await BilibiliClient(session).resolve_short_link("https://b23.tv/Example")
++        self.assertEqual(session.calls, 3)
++
++    async def test_detail_budget_and_cache_are_shared_across_concurrent_requests(
++        self,
++    ) -> None:
++        class Client(FixtureBilibiliClient):
++            def __init__(self):
++                super().__init__(object())
++                self.inflight = self.peak = self.calls = 0
++
++            async def _wbi_data(self, endpoint, params):
++                self.calls += 1
++                self.inflight += 1
++                self.peak = max(self.peak, self.inflight)
++                await asyncio.sleep(0.01)
++                self.inflight -= 1
++                return await super()._wbi_data(endpoint, params)
++
++        client = Client()
++        await asyncio.gather(
++            client.get_video("BVone"),
++            client.get_video("BVone"),
++            client.get_video("BVtwo"),
++        )
++        self.assertEqual(client.calls, 2)
++        self.assertEqual(client.peak, 1)
++
++    async def test_412_stops_queued_detail_burst_without_automatic_retries(
++        self,
++    ) -> None:
++        class Client(BilibiliClient):
++            calls = 0
++
++            async def _wbi_data(self, *_args, **_kwargs):
++                self.calls += 1
++                raise BilibiliHttpError(412)
++
++        client = Client(object())
++        results = await asyncio.gather(
++            *(client.get_video(f"BV{index}") for index in range(8)),
++            return_exceptions=True,
++        )
++        self.assertEqual(client.calls, 1)
++        self.assertTrue(
++            all(
++                isinstance(result, BilibiliHttpError) and result.status == 412
++                for result in results
++            )
++        )
++
+     def test_video_track_selection_prefers_lowest_quality(self) -> None:
+         def track(
+             stream_id: int, codecs: str, *, bandwidth: int = 1_000_000
+--- a/tests/test_main.py
++++ b/tests/test_main.py
+@@ -202,9 +202,9 @@
+ 
+ ensure_aiohttp()
+ _install_astrbot_doubles()
+-listen_main = importlib.import_module("astrbot_plugin_bili_player.main")
+-core_media = importlib.import_module("astrbot_plugin_bili_player.core.media")
+-core_settings = importlib.import_module("astrbot_plugin_bili_player.core.settings")
++listen_main = importlib.import_module("astrbot_plugin_listen_music.main")
++core_media = importlib.import_module("astrbot_plugin_listen_music.core.media")
++core_settings = importlib.import_module("astrbot_plugin_listen_music.core.settings")
+ DOWNLOAD_MEDIA_LIMITS = core_media.DOWNLOAD_MEDIA_LIMITS
+ VIDEO_MEDIA_LIMITS = core_media.VIDEO_MEDIA_LIMITS
+ VOICE_MEDIA_LIMITS = core_media.VOICE_MEDIA_LIMITS
+@@ -309,6 +309,43 @@
+ 
+ 
+ class MainContractTests(unittest.IsolatedAsyncioTestCase):
++    async def test_find_music_resolves_user_short_link_through_real_search_service(
++        self,
++    ) -> None:
++        class Client:
++            async def resolve_short_link(self, value):
++                self.resolved = value
++                return listen_main.parse_bilibili_video_ref("BV1Q541167Qg")
++
++            async def get_video(self, bvid):
++                return types.SimpleNamespace(
++                    bvid=bvid,
++                    title="Exact linked song",
++                    uploader="",
++                    pages=(
++                        types.SimpleNamespace(cid=12, title="song", duration_ms=120000),
++                    ),
++                )
++
++            async def search_videos(self, *_args, **_kwargs):
++                raise AssertionError("a user link must not become a keyword search")
++
++        client = Client()
++        plugin = object.__new__(listen_main.ListenMusicPlugin)
++        plugin._search = listen_main.SearchService(client)
++        _configure_selection_waits(plugin)
++        event = _SendingEvent("chat-a", "https://b23.tv/Example 这个翻唱一下")
++        payload = json.loads(
++            await plugin.find_in_bilibili_for_llm(event, "https://b23.tv/Example", delivery="audio")
++        )
++        self.assertEqual(payload["status"], "candidates")
++        self.assertEqual(payload["candidates"][0]["title"], "Exact linked song - song")
++        self.assertEqual(client.resolved, "https://b23.tv/Example")
++        self.assertEqual(event.sent, [])
++        self.assertIsNone(
++            plugin._search.snapshot(search_id=payload["search_id"], session_id="chat-b")
++        )
++
+     def setUp(self) -> None:
+         listen_main.FILTERS.clear()
+         listen_main.SessionWaiter.instances.clear()
+@@ -781,7 +818,7 @@
+         self.assertIsInstance(event.sent[1][0], listen_main.File)
+         self.assertEqual(
+             event.sent[1][0].kwargs,
+-            {"name": "fixture.m4a", "file": "/tmp/fixture.m4a"},
++            {"name": "fixture.m4a", "file": str(Path("/tmp/fixture.m4a"))},
+         )
+ 
+     async def test_find_uses_a_debounced_message_as_one_fuzzy_query(
+@@ -1469,7 +1506,7 @@
+         )
+         component = reply.sent[1][0]
+         self.assertEqual(component.kwargs["name"], "fixture.m4a")
+-        self.assertEqual(component.kwargs["file"], "/tmp/fixture.m4a")
++        self.assertEqual(component.kwargs["file"], str(Path("/tmp/fixture.m4a")))
+         self.assertEqual(released, [media])
+ 
+     async def test_long_manual_voice_selection_keeps_wait_for_download(self) -> None:
+@@ -1714,7 +1751,7 @@
+         self.assertIsInstance(component, listen_main.File)
+         self.assertEqual(
+             component.kwargs,
+-            {"name": "fixture.m4a", "file": "/tmp/fixture.m4a"},
++            {"name": "fixture.m4a", "file": str(Path("/tmp/fixture.m4a"))},
+         )
+ 
+     async def test_weixin_oc_voice_delivery_uses_file_without_trying_record(
+@@ -1961,12 +1998,12 @@
+         self.assertEqual(
+             [route[0] for route in routes],
+             [
+-                "/astrbot_plugin_bili_player/accounts/status",
+-                "/astrbot_plugin_bili_player/accounts/login",
+-                "/astrbot_plugin_bili_player/accounts/login/<session_id>/events",
+-                "/astrbot_plugin_bili_player/accounts/login/<session_id>/cancel",
+-                "/astrbot_plugin_bili_player/accounts/logout",
+-                "/astrbot_plugin_bili_player/accounts/credentials",
++                "/astrbot_plugin_listen_music/accounts/status",
++                "/astrbot_plugin_listen_music/accounts/login",
++                "/astrbot_plugin_listen_music/accounts/login/<session_id>/events",
++                "/astrbot_plugin_listen_music/accounts/login/<session_id>/cancel",
++                "/astrbot_plugin_listen_music/accounts/logout",
++                "/astrbot_plugin_listen_music/accounts/credentials",
+             ],
+         )
+ 
+--- a/tests/test_media.py
++++ b/tests/test_media.py
+@@ -236,12 +236,12 @@
+             limits = MediaLimits(
+                 max_bytes=1024,
+                 max_duration_ms=None,
+-                download_timeout_seconds=0.1,
++                download_timeout_seconds=0.5,
+             )
+             waiting_backup = GateContent()
+             session = FakeSession(
+                 [
+-                    DelayedResponse([], status=500, delay_seconds=0.06),
++                    DelayedResponse([], status=500, delay_seconds=0.01),
+                     FakeResponse(waiting_backup),
+                 ]
+             )
+@@ -257,7 +257,7 @@
+                         filename_stem="timed-out-download",
+                         limits=limits,
+                     ),
+-                    timeout=0.5,
++                    timeout=2,
+                 )
+ 
+             self.assertEqual(len(session.calls), 2)
+--- a/tests/test_services.py
++++ b/tests/test_services.py
+@@ -17,7 +17,7 @@
+     MediaError,
+     MediaLimits,
+ )
+-from core.bilibili import BilibiliVideoRef
++from core.bilibili import BilibiliHttpError, BilibiliVideoRef
+ from core.models import LocalMedia, ResolvedAudio
+ from core.services import (
+     SEARCH_LIMIT,
+@@ -165,6 +165,115 @@
+ 
+ 
+ class BilibiliWorkflowTests(unittest.IsolatedAsyncioTestCase):
++    async def test_empty_primary_search_does_not_hide_fallback_source_failure(
++        self,
++    ) -> None:
++        client = FakeBilibili((), query_errors={"歌曲": BilibiliHttpError(412)})
++        with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++            await SearchService(client).search(
++                session_id="chat-a", query="歌曲 歌手", song_title="歌曲"
++            )
++
++    async def test_partial_failure_with_no_deliverable_page_is_a_source_error(
++        self,
++    ) -> None:
++        class Client(FakeBilibili):
++            async def get_video(self, bvid):
++                if bvid == "BV2":
++                    raise BilibiliHttpError(412)
++                return await super().get_video(bvid)
++
++        client = Client((video("BV1", pages=(Page(1, "song", 9999999),)), video("BV2")))
++        with self.assertLogs("core.services", level="WARNING"):
++            with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++                await SearchService(client).search(
++                    session_id="chat-a", query="歌曲", max_duration_ms=900000
++                )
++
++    async def test_all_detail_failures_preserve_412_instead_of_empty_catalogue(
++        self,
++    ) -> None:
++        client = FakeBilibili(
++            (video("BV1"), video("BV2")), reference_error=BilibiliHttpError(412)
++        )
++        search = SearchService(client)
++        with self.assertLogs("core.services", level="WARNING") as logs:
++            with self.assertRaisesRegex(
++                MusicSearchError, "HTTP 412.*稍后重试"
++            ) as error:
++                await search.search(
++                    session_id="chat-a", query="歌曲 歌手", song_title="歌曲"
++                )
++        self.assertNotIn("没有找到", str(error.exception))
++        self.assertEqual(client.search_queries, ["歌曲 歌手"])
++        self.assertIn("2/2", logs.output[0])
++
++    async def test_partial_detail_failure_keeps_usable_results_and_warns(self) -> None:
++        class Client(FakeBilibili):
++            async def get_video(self, bvid):
++                if bvid == "BV2":
++                    raise BilibiliHttpError(412)
++                return await super().get_video(bvid)
++
++        client = Client((video("BV1"), video("BV2")))
++        with self.assertLogs("core.services", level="WARNING") as logs:
++            snapshot = await SearchService(client).search(
++                session_id="chat-a", query="歌曲"
++            )
++        self.assertEqual([candidate.bvid for candidate in snapshot.candidates], ["BV1"])
++        self.assertIn("1/2", logs.output[0])
++
++    async def test_search_endpoint_and_exact_reference_report_412(self) -> None:
++        search = SearchService(FakeBilibili((), search_error=BilibiliHttpError(412)))
++        with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++            await search.search(session_id="chat-a", query="歌曲")
++        client = FakeBilibili((), reference_error=BilibiliHttpError(412))
++        with self.assertRaisesRegex(MusicSearchError, "HTTP 412"):
++            await SearchService(client).search(
++                session_id="chat-a", query="https://www.bilibili.com/video/BV1Q541167Qg"
++            )
++        self.assertEqual(client.search_queries, [])
++
++    async def test_network_detail_failures_are_not_reported_as_missing_songs(
++        self,
++    ) -> None:
++        client = FakeBilibili((video("BV1"),), reference_error=TimeoutError())
++        with self.assertLogs("core.services", level="WARNING"):
++            with self.assertRaisesRegex(MusicSearchError, "暂时不可用.*稍后重试"):
++                await SearchService(client).search(session_id="chat-a", query="歌曲")
++
++    async def test_link_title_creates_scoped_candidates_without_keyword_search(
++        self,
++    ) -> None:
++        class Client(FakeBilibili):
++            def __init__(self):
++                super().__init__((video("BV1Q541167Qg"),))
++                self.short_calls = []
++
++            async def resolve_short_link(self, value):
++                self.short_calls.append(value)
++                return BilibiliVideoRef(bvid="BV1Q541167Qg")
++
++        client = Client()
++        search = SearchService(client)
++        for query in (
++            "https://b23.tv/Example",
++            "https://www.bilibili.com/video/BV1Q541167Qg/?p=1",
++            "BV1Q541167Qg",
++        ):
++            snapshot = await search.search(
++                session_id="chat-a", query=query, song_title=query
++            )
++            self.assertEqual(snapshot.candidates[0].bvid, "BV1Q541167Qg")
++            self.assertIsNone(
++                search.snapshot(search_id=snapshot.search_id, session_id="chat-b")
++            )
++            self.assertIsNotNone(
++                search.snapshot(search_id=snapshot.search_id, session_id="chat-a")
++            )
++        self.assertEqual(client.search_queries, [])
++        self.assertEqual(client.short_calls, ["https://b23.tv/Example"])
++
+     async def _workflow(
+         self,
+         videos: tuple[Video, ...],
+--- a/tests/test_settings.py
++++ b/tests/test_settings.py
+@@ -83,7 +83,7 @@
+         )
+ 
+     def test_schema_is_valid_and_matches_enum_values(self) -> None:
+-        schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text())
++        schema = json.loads((PLUGIN_ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+ 
+         self.assertEqual(
+             schema["media_priority"]["options"],
+--- /dev/null
++++ b/tests/test_windows_credentials.py
+@@ -0,0 +1,105 @@
++"""Isolated Windows credential persistence and access-control regression tests."""
++
++import asyncio
++import importlib.util
++import os
++import subprocess
++import sys
++import tempfile
++import time
++import unittest
++from pathlib import Path
++from unittest.mock import patch
++
++ROOT = Path(__file__).resolve().parents[1]
++
++def load_module(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++accounts = load_module("audited_accounts", ROOT / "core/accounts.py")
++
++
++class CredentialsTests(unittest.IsolatedAsyncioTestCase):
++    async def test_login_roundtrip_has_private_acl_and_no_public_cookies(self):
++        with tempfile.TemporaryDirectory() as directory:
++            target = Path(directory) / "accounts.json"
++            store = accounts.CredentialStore(target)
++
++            async def start():
++                return accounts.QrLoginStart(
++                    "https://example.test/login", "opaque-test-token", time.time() + 60
++                )
++
++            async def poll(_):
++                return accounts.QrLoginPoll("confirmed", cookies={"SESSDATA": "dummy"})
++
++            async def profile(_):
++                return accounts.AccountProfile("Test administrator")
++
++            service = accounts.AccountService(
++                store,
++                accounts.BilibiliAuthenticator(start=start, poll=poll, profile=profile),
++                poll_interval=0.001,
++            )
++            try:
++                session = await service.start_login("test-admin")
++                events = [
++                    e async for e in service.login_events(session["session_id"], "test-admin")
++                ]
++                self.assertEqual(events[-1]["state"], "confirmed")
++                self.assertEqual((await store.load()).cookies, {"SESSDATA": "dummy"})
++                self.assertNotIn("SESSDATA", str(await service.status_payload()))
++                self.assertNotIn("dummy", str(await service.status_payload()))
++                if os.name == "nt":
++                    import win32api
++                    import win32con
++                    import win32security
++
++                    token = win32security.OpenProcessToken(
++                        win32api.GetCurrentProcess(), win32con.TOKEN_QUERY
++                    )
++                    try:
++                        user_sid = win32security.GetTokenInformation(
++                            token, win32security.TokenUser
++                        )[0]
++                    finally:
++                        token.Close()
++                    security = win32security.GetNamedSecurityInfo(
++                        str(target), win32security.SE_FILE_OBJECT,
++                        win32security.DACL_SECURITY_INFORMATION,
++                    )
++                    acl = security.GetSecurityDescriptorDacl()
++                    self.assertEqual(acl.GetAceCount(), 1)
++                    ace = acl.GetAce(0)
++                    self.assertEqual(str(ace[2]), str(user_sid))
++                    self.assertFalse(ace[0][1] & win32security.INHERITED_ACE)
++                    self.assertTrue(
++                        security.GetSecurityDescriptorControl()[0]
++                        & win32security.SE_DACL_PROTECTED
++                    )
++                else:
++                    self.assertEqual(target.stat().st_mode & 0o777, 0o600)
++                await store.save(None)
++                self.assertIsNone(await store.load())
++            finally:
++                await service.aclose()
++
++    @unittest.skipUnless(os.name == "nt", "Windows-specific ACL failure")
++    async def test_acl_failure_never_writes_credentials_or_replaces_existing_file(self):
++        with tempfile.TemporaryDirectory() as directory:
++            target = Path(directory) / "accounts.json"
++            target.write_bytes(b"original")
++            store = accounts.CredentialStore(target)
++            with patch.object(accounts.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "icacls")):
++                with self.assertRaises(accounts.CredentialStoreError):
++                    await store.save(None)
++            self.assertEqual(target.read_bytes(), b"original")
++            self.assertEqual(list(Path(directory).iterdir()), [target])
++
++
++if __name__ == "__main__":
++    unittest.main()

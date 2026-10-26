@@ -53,20 +53,26 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
         sys.modules.update(cls._previous_modules)
 
     def setUp(self):
-        self.song = SimpleNamespace(id=1, name="Test song")
+        self.modern = hasattr(self.plugin_class, "get_players_by_priority")
+        self.song = SimpleNamespace(id="1", name="Test song", artists="Test artist", duration=180000)
         self.player = SimpleNamespace(
             platform=SimpleNamespace(
                 name="netease",
                 display_name="网易云音乐",
                 keywords=["网易云", "网易点歌"],
             ),
+            platform_cfg=SimpleNamespace(priority=1, trigger_words=["网易云", "网易点歌"]),
             fetch_songs=AsyncMock(return_value=[self.song]),
         )
         self.plugin = object.__new__(self.plugin_class)
         self.plugin.players = [self.player]
-        self.plugin.cfg = SimpleNamespace(default_player_name="网易点歌")
+        self.plugin.cfg = SimpleNamespace(
+            default_player_name="网易点歌",
+            search_config=SimpleNamespace(song_limit=1),
+            send_config=SimpleNamespace(return_play_song_result=True),
+        )
         self.plugin.sender = SimpleNamespace(
-            send_song=AsyncMock(), send_lyrics=AsyncMock(return_value=True)
+            send_song=AsyncMock(return_value=(True, False)), send_lyrics=AsyncMock(return_value=True)
         )
         self.star = SimpleNamespace(
             module_path="data.plugins.astrbot_plugin_music.main",
@@ -82,6 +88,8 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
         properties = {"song_name": {"type": "string"}}
         if name == "play_song_by_name":
             properties["platform"] = {"type": "string"}
+            if self.modern:
+                properties.update({"artist": {"type": "string"}, "send_mode": {"type": "string"}})
         original = copy.deepcopy(
             next(tool for tool in llm_tools.func_list if tool.name == name)
         )
@@ -99,10 +107,10 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
         event = event_for("play the test song", "999", "456", "321")
         await self.execute("play_song_by_name", event, song_name="Test song")
         self.player.fetch_songs.assert_awaited_once_with(
-            keyword="Test song", limit=1, extra=None
+            keyword="Test song", limit=1, **({} if self.modern else {"extra": None})
         )
         self.plugin.sender.send_song.assert_awaited_once_with(
-            event, self.player, self.song
+            event, self.player, self.song, **({"modes": None} if self.modern else {})
         )
 
     async def test_registered_platform_alias_uses_current_group_event(self):
@@ -111,10 +119,10 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
             "play_song_by_name", event, song_name="Test song", platform="网易点歌"
         )
         self.player.fetch_songs.assert_awaited_once_with(
-            keyword="Test song", limit=1, extra="网易点歌"
+            keyword="Test song", limit=1, **({} if self.modern else {"extra": "网易点歌"})
         )
         self.plugin.sender.send_song.assert_awaited_once_with(
-            event, self.player, self.song
+            event, self.player, self.song, **({"modes": None} if self.modern else {})
         )
 
     async def test_lyrics_use_default_player_and_current_event(self):

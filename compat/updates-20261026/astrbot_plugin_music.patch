@@ -1,0 +1,252 @@
+--- a/core/platform/base.py
++++ b/core/platform/base.py
+@@ -1,10 +1,11 @@
++import asyncio
+ import json
+ import uuid
+ from abc import ABC, abstractmethod
+ from pathlib import Path
+ from typing import ClassVar
+-
+-import aiofiles
++from urllib.parse import urlsplit
++
+ import aiohttp
+ 
+ from astrbot.api import logger
+@@ -27,6 +28,9 @@
+     platform: ClassVar[Platform]
+     """ 平台信息（包含名称和显示名称） """
+     platform_cfg: MusicPlayerItem
++
++    MAX_SONG_BYTES = 25 * 1024 * 1024
++    SONG_TIMEOUT_SECONDS = 180
+ 
+     HEADERS = {
+         "User-Agent": (
+@@ -116,22 +120,47 @@
+         """
+         self.cfg.temp_dir.mkdir(parents=True, exist_ok=True)
+         file_path = self.cfg.temp_dir / f"{uuid.uuid4().hex}.mp3"
+-        try:
+-            async with self._get_session().get(
+-                url, proxy=self.platform_cfg.proxy or None
+-            ) as response:
+-                if response.status != 200:
+-                    logger.warning(f"歌曲下载失败，HTTP 状态码：{response.status}")
+-                    return None
+-                async with aiofiles.open(file_path, "wb") as file:
+-                    async for chunk in response.content.iter_chunked(1024):
+-                        await file.write(chunk)
++        completed = False
++        try:
++            parsed = urlsplit(url)
++            if (
++                parsed.scheme not in {"http", "https"}
++                or not parsed.hostname
++                or parsed.username
++                or parsed.password
++            ):
++                raise ValueError("An HTTP(S) music URL is required.")
++            async with asyncio.timeout(self.SONG_TIMEOUT_SECONDS):
++                async with self._get_session().get(
++                    url, proxy=self.platform_cfg.proxy or None
++                ) as response:
++                    if response.status != 200:
++                        logger.warning(f"歌曲下载失败，HTTP 状态码：{response.status}")
++                        return None
++                    if (
++                        response.content_length is not None
++                        and response.content_length > self.MAX_SONG_BYTES
++                    ):
++                        raise ValueError("Music download exceeds the 25 MiB limit.")
++                    received = 0
++                    # 同步打开及有界写入，取消任务时仍能立即关闭 Windows 文件句柄。
++                    with file_path.open("wb") as file:
++                        async for chunk in response.content.iter_chunked(64 * 1024):
++                            received += len(chunk)
++                            if received > self.MAX_SONG_BYTES:
++                                raise ValueError("Music download exceeds the 25 MiB limit.")
++                            file.write(chunk)
++                    if not received:
++                        raise ValueError("Music provider returned an empty file.")
++            completed = True
+             logger.debug(f"歌曲下载完成，保存在：{file_path}")
+             return file_path
+-        except Exception as e:
+-            file_path.unlink(missing_ok=True)
+-            logger.error(f"歌曲下载失败，错误信息：{e}")
++        except (aiohttp.ClientError, OSError, TimeoutError, ValueError) as e:
++            logger.error(f"歌曲下载失败（{type(e).__name__}）")
+             return None
++        finally:
++            if not completed:
++                file_path.unlink(missing_ok=True)
+ 
+     async def fetch_comments(self, song: Song) -> Song:
+         """
+--- a/main.py
++++ b/main.py
+@@ -74,7 +74,11 @@
+             if name:
+                 name_ = name.strip().lower()
+                 p = player.platform
+-                if p.display_name.lower() == name_ or p.name.lower() == name_:
++                if (
++                    p.display_name.lower() == name_
++                    or p.name.lower() == name_
++                    or name_ in {keyword.lower() for keyword in player.platform_cfg.trigger_words}
++                ):
+                     return player
+             elif word:
+                 route = self.trigger_routes.get(word.strip().lower())
+--- /dev/null
++++ b/tests/test_bridge_music_compat.py
+@@ -0,0 +1,147 @@
++"""Isolated bounded-download and fixed-platform selection regression tests."""
++
++import atexit
++import asyncio
++import ast
++import importlib.util
++import os
++import sys
++import tempfile
++import types
++import unittest
++from pathlib import Path
++
++from aiohttp import web
++
++ROOT = Path(__file__).resolve().parents[1]
++_runtime = tempfile.TemporaryDirectory()
++atexit.register(_runtime.cleanup)
++os.environ["ASTRBOT_ROOT"] = _runtime.name
++
++def load_module(name, path):
++    spec = importlib.util.spec_from_file_location(name, path)
++    module = importlib.util.module_from_spec(spec)
++    sys.modules[name] = module
++    spec.loader.exec_module(module)
++    return module
++
++package = types.ModuleType("audited_music")
++package.__path__ = []
++sys.modules[package.__name__] = package
++config_module = types.ModuleType("audited_music.config")
++config_module.PluginConfig = object
++config_module.MusicPlayerItem = object
++sys.modules[config_module.__name__] = config_module
++model_module = load_module("audited_music.model", ROOT / "core/model.py")
++platform_package = types.ModuleType("audited_music.platform")
++platform_package.__path__ = []
++sys.modules[platform_package.__name__] = platform_package
++downloader_module = load_module("audited_music.platform.base", ROOT / "core/platform/base.py")
++
++
++class FixturePlayer(downloader_module.BaseMusicPlayer):
++    platform = model_module.Platform(name="netease", display_name="网易云音乐")
++
++    async def fetch_songs(self, keyword, limit, extra=None):
++        return []
++
++
++class DownloaderTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.directory = tempfile.TemporaryDirectory()
++        self.addCleanup(self.directory.cleanup)
++        self.root = Path(self.directory.name)
++        self.downloader = FixturePlayer(
++            types.SimpleNamespace(
++                temp_dir=self.root,
++                players=types.SimpleNamespace(netease=types.SimpleNamespace(proxy=None)),
++            )
++        )
++        self.addAsyncCleanup(self.downloader.close)
++        self.downloader.MAX_SONG_BYTES = 32
++        self.downloader.SONG_TIMEOUT_SECONDS = 0.1
++        self.request_started = asyncio.Event()
++
++        async def handler(request):
++            path = request.path
++            if path == "/ok":
++                return web.Response(body=b"audio-fixture")
++            if path == "/long":
++                return web.Response(body=b"x" * 64)
++            if path == "/error":
++                return web.Response(status=503)
++            if path == "/empty":
++                return web.Response(body=b"")
++            response = web.StreamResponse()
++            await response.prepare(request)
++            try:
++                await response.write(b"x" * 16)
++                self.request_started.set()
++                if path == "/chunked":
++                    await response.write(b"y" * 20)
++                else:
++                    await asyncio.sleep(0.2)
++            except ConnectionError:
++                pass
++            return response
++
++        app = web.Application()
++        app.router.add_get("/{name}", handler)
++        self.runner = web.AppRunner(app)
++        await self.runner.setup()
++        self.addAsyncCleanup(self.runner.cleanup)
++        site = web.TCPSite(self.runner, "127.0.0.1", 0)
++        await site.start()
++        self.base = f"http://127.0.0.1:{site._server.sockets[0].getsockname()[1]}"
++
++    async def test_completed_download(self):
++        path = await self.downloader.download_audio(self.base + "/ok")
++        self.assertEqual(path.read_bytes(), b"audio-fixture")
++        self.assertEqual(path.parent, self.root)
++
++    async def test_header_limit_chunked_limit_empty_and_http_failure_leave_no_file(self):
++        for endpoint in ["long", "chunked", "empty", "error"]:
++            with self.subTest(endpoint=endpoint):
++                self.assertIsNone(await self.downloader.download_audio(self.base + "/" + endpoint))
++                self.assertEqual(list(self.root.iterdir()), [])
++
++    async def test_timeout_cleans_partial_file(self):
++        self.assertIsNone(await self.downloader.download_audio(self.base + "/slow"))
++        self.assertEqual(list(self.root.iterdir()), [])
++
++    async def test_cancel_propagates_and_cleans_partial_file(self):
++        task = asyncio.create_task(self.downloader.download_audio(self.base + "/slow"))
++        await self.request_started.wait()
++        await asyncio.sleep(0.01)
++        task.cancel()
++        with self.assertRaises(asyncio.CancelledError):
++            await task
++        self.assertEqual(list(self.root.iterdir()), [])
++
++    async def test_local_file_and_credential_urls_are_rejected(self):
++        for value in ["file:///C:/private.png", "C:/private.png", "https://user:password@example.test/a"]:
++            self.assertIsNone(await self.downloader.download_audio(value))
++        self.assertEqual(list(self.root.iterdir()), [])
++
++
++class PlayerSelectionTests(unittest.TestCase):
++    def test_documented_aliases_map_to_registered_players_only(self):
++        # Exercise the exact method without initializing HTTP sessions or WebUI.
++        source = (ROOT / "main.py").read_text(encoding="utf-8")
++        module = ast.parse(source)
++        cls = next(node for node in module.body if isinstance(node, ast.ClassDef))
++        method = next(node for node in cls.body if isinstance(node, ast.FunctionDef) and node.name == "get_player")
++        namespace = {"BaseMusicPlayer": object}
++        exec(compile(ast.Module(body=[method], type_ignores=[]), "<get_player>", "exec"), namespace)
++        player = types.SimpleNamespace(platform=types.SimpleNamespace(
++            name="netease", display_name="网易云音乐"
++        ), platform_cfg=types.SimpleNamespace(trigger_words=["网易云", "网易点歌"]))
++        host = types.SimpleNamespace(players=[player])
++        for alias in ["netease", "网易云音乐", "网易点歌"]:
++            self.assertIs(namespace["get_player"](host, name=alias), player)
++        for alias in ["https://example.test/song.mp3", "file:///C:/private", "网易点歌;run"]:
++            self.assertIsNone(namespace["get_player"](host, name=alias))
++
++
++if __name__ == "__main__":
++    unittest.main()
