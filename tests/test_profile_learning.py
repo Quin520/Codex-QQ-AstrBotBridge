@@ -166,6 +166,35 @@ class ProfileLearningTests(unittest.IsolatedAsyncioTestCase):
                 self.add([change])
         self.assertEqual(self.store.list(), [])
 
+    def test_queue_classifies_stale_profiles_without_changing_the_saved_evidence(self):
+        self.add()
+        row = self.row()
+        saved = self.store.path.read_bytes()
+        self.config["user_profiles"][1]["custom_instructions"] = "New manual rule"
+        self.config.save_config()
+        self.assertEqual(self.store.list(), [])
+        stale = self.store.list(True)[0]
+        self.assertEqual((stale["id"], stale["status"]), (row, "stale"))
+        self.assertEqual(stale["stored_status"], "pending")
+        self.assertTrue(stale["stale_reason"])
+        self.assertEqual(self.store.path.read_bytes(), saved)
+        self.assertFalse(self.store.review(row, "approve")[0])
+        self.config["user_profiles"].pop()
+        self.config.save_config()
+        self.assertEqual(self.store.list(), [])
+        self.assertEqual(self.store.list(True)[0]["status"], "stale")
+        self.assertEqual(self.store.path.read_bytes(), saved)
+
+    def test_profile_queue_checks_current_scope_and_not_suggestion_age(self):
+        self.add()
+        self.store.records[0]["timestamp"] = 1
+        self.store._save()
+        self.assertEqual(self.store.list()[0]["status"], "pending")
+        self.config["group_qq"] = "789"
+        self.config.save_config()
+        self.assertEqual(self.store.list(), [])
+        self.assertEqual(self.store.list(True)[0]["status"], "stale")
+
     def test_rejection_deduplication_and_delete_survive_reload(self):
         self.add()
         row = self.row()

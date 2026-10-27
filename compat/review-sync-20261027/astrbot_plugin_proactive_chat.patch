@@ -1,0 +1,133 @@
+--- a/core/web_admin_server.py
++++ b/core/web_admin_server.py
+@@ -11,6 +11,7 @@
+ import subprocess
+ import sys
+ import time
++from copy import deepcopy
+ from datetime import datetime
+ from pathlib import Path
+ from typing import Any
+@@ -287,6 +288,8 @@
+ 
+         @self.app.post("/api/config")
+         async def update_config(payload: dict[str, Any]):
++            original = deepcopy(dict(self.config))
++            updated = deepcopy(original)
+             # 仅允许更新这三个一级配置块，避免前端误写其它未知字段。
+             allowed_keys = {"friend_settings", "group_settings", "web_admin"}
+             for key in allowed_keys:
+@@ -294,17 +297,30 @@
+                     continue
+                 if key == "web_admin":
+                     # web_admin 采用增量合并，避免未提交字段被整个覆盖掉。
+-                    old = dict(self.config.get("web_admin", {}))
++                    old = dict(updated.get("web_admin", {}))
+                     old.update(payload.get("web_admin", {}))
+                     # 密码字段允许显式更新，但不会通过 get_config 回传给前端。
+                     if "password" in payload.get("web_admin", {}):
+                         old["password"] = payload["web_admin"]["password"]
+-                    self.config["web_admin"] = old
++                    updated["web_admin"] = old
+                 else:
+                     # friend / group 配置块按前端提交的完整对象直接替换。
+-                    self.config[key] = payload[key]
+-
+-            self._save_plugin_config()
++                    updated[key] = payload[key]
++
++            self.config.clear()
++            self.config.update(updated)
++            try:
++                self.config.save_config()
++            except Exception:
++                self.config.clear()
++                self.config.update(original)
++                logger.exception(
++                    "Proactive configuration save failed; restored runtime values"
++                )
++                return JSONResponse(
++                    {"ok": False, "message": "配置保存失败，未应用变更；请查看日志。"},
++                    status_code=500,
++                )
+             # 配置变更后立即广播，确保所有已打开页面实时刷新。
+             await self._broadcast_update("config")
+             return {"ok": True}
+@@ -736,14 +752,6 @@
+                 if websocket in self._ws_connections:
+                     self._ws_connections.remove(websocket)
+ 
+-    def _save_plugin_config(self) -> None:
+-        try:
+-            # AstrBot 配置对象通常提供 save_config 方法，这里做鸭子类型兼容。
+-            if hasattr(self.config, "save_config"):
+-                self.config.save_config()
+-        except Exception as e:
+-            logger.warning(f"[主动消息] 保存配置失败喵: {e}")
+-
+     def _issue_token(self) -> str:
+         # 生成适合放入 URL / Header 的安全随机 token。
+         token = secrets.token_urlsafe(24)
+--- /dev/null
++++ b/tests/test_config_save_consistency.py
+@@ -0,0 +1,60 @@
++"""Check persistence and rollback through the actual console HTTP routes."""
++
++import importlib
++import json
++import sys
++import types
++from copy import deepcopy
++from pathlib import Path
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, patch
++
++import httpx
++import pytest
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("fail", [False, True])
++async def test_console_save_matches_runtime_and_disk(tmp_path, fail):
++    class Config(dict):
++        def save_config(self):
++            if fail:
++                raise OSError("fixture write failure")
++            path.write_text(json.dumps(dict(self)), encoding="utf-8")
++
++    original = {
++        "web_admin": {"password": ""},
++        "group_settings": {"enable": False},
++        "friend_settings": {"enable": False},
++        "unrelated": "retained",
++    }
++    path = tmp_path / "config.json"
++    path.write_text(json.dumps(original), encoding="utf-8")
++    config = Config(deepcopy(original))
++    package = types.ModuleType("proactive_config_test")
++    package.__path__ = [str(Path(__file__).resolve().parents[1])]
++    with patch.dict(sys.modules, {package.__name__: package}):
++        module = importlib.import_module("proactive_config_test.core.web_admin_server")
++        server = module.WebAdminServer(SimpleNamespace(config=config))
++        server._broadcast_update = AsyncMock()
++        async with httpx.AsyncClient(
++            transport=httpx.ASGITransport(app=server.app), base_url="http://test"
++        ) as client:
++            response = await client.post(
++                "/api/config", json={"group_settings": {"enable": True}}
++            )
++            visible = (await client.get("/api/config")).json()
++        disk = json.loads(path.read_text(encoding="utf-8"))
++        assert disk == dict(config)
++        assert visible["group_settings"] == disk["group_settings"]
++        assert disk["unrelated"] == "retained"
++        if fail:
++            assert response.status_code == 500
++            assert response.json()["ok"] is False
++            assert disk == original
++            server._broadcast_update.assert_not_awaited()
++        else:
++            assert response.status_code == 200
++            assert response.json()["ok"] is True
++            assert disk["group_settings"]["enable"] is True
++            server._broadcast_update.assert_awaited_once_with("config")

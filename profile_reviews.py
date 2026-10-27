@@ -212,12 +212,38 @@ class ProfileReviewStore:
         return len(rows)
 
     def list(self, reviewed: bool = False) -> list[dict]:
+        """Classify suggestions using fresh settings without changing stored evidence.
+
+        Args:
+            reviewed: Include history and stale suggestions instead of valid pending rows.
+
+        Returns:
+            Display records with stale reasons and private snapshots removed.
+        """
         self.recover()
+        config = self.current_config()
         result = []
         for record in self.records:
-            if (record["status"] != "pending") != reviewed:
-                continue
             row = deepcopy(record)
+            if row["status"] == "pending":
+                try:
+                    current = normalized_profile(self.profile(config, row["qq"]))
+                    stale = (
+                        current != row["snapshot"] or self.scope(config) != row["scope"]
+                    )
+                    reason = (
+                        "成员设置或关系预设已变化，原建议不能直接批准。"
+                        if stale
+                        else ""
+                    )
+                except ValueError as error:
+                    reason = str(error)
+                if reason:
+                    row.update(
+                        status="stale", stored_status="pending", stale_reason=reason
+                    )
+            if (row["status"] != "pending") != reviewed:
+                continue
             spec = FIELDS[row["field"]]
             row.update(
                 {

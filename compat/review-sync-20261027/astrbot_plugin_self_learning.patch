@@ -1,0 +1,861 @@
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -2,7 +2,7 @@
+   "Dependency_Install_Guide": {
+     "description": "依赖安装",
+     "type": "object",
+-    "hint": "依赖不会在插件安装或启动时自动安装。请进入插件 WebUI Dashboard 的全量设置顶部，手动点击基础能力依赖或全能力依赖。",
++    "hint": "本页是运行配置，不是待审列表。请在 AstrBot 侧栏打开自学习面板的“审查队列”，或打开独立 WebUI；两边使用同一份审批记录。[打开自学习面板](#/plugin-view/astrbot_plugin_self_learning/dashboard)。依赖可在面板全量设置顶部手动安装。",
+     "obvious_hint": true,
+     "items": {
+       "dependency_install_entry": {
+--- a/core/page_api.py
++++ b/core/page_api.py
+@@ -338,6 +338,16 @@
+             container = self._container()
+             review_service = imports.PersonaReviewService(container)
+ 
++            if action == "affection_review":
++                from ..services.learning.affection_review import AffectionReviewService
++
++                decision = str(body.get("decision") or "")
++                if decision not in {"approve", "reject"}:
++                    return self._operation(False, "必须明确选择通过或驳回")
++                success, message = await AffectionReviewService(
++                    container.database_manager, container.plugin_config
++                ).decide(self._body_int(body, "id"), decision)
++                return self._operation(success, message)
+             if action == "review":
+                 success, message = await review_service.review_persona_update(
+                     str(body.get("id") or ""),
+@@ -981,9 +991,14 @@
+         review_service = imports.PersonaReviewService(container)
+         learning_service = imports.LearningService(container)
+         jargon_service = imports.JargonService(container)
+-        bounded_limit = max(1, min(limit or 50, 100))
+-
+-        pending, reviewed, style_reviews, pending_jargon = await asyncio.gather(
++        bounded_limit = max(0, min(limit, 100))
++        from ..services.learning.affection_review import AffectionReviewService
++
++        affection_service = AffectionReviewService(
++            container.database_manager, container.plugin_config
++        )
++
++        pending, reviewed, style_reviews, pending_jargon, affection = await asyncio.gather(
+             self._safe_section(
+                 "persona_pending",
+                 lambda: review_service.get_pending_persona_updates(
+@@ -997,7 +1012,7 @@
+             self._safe_section(
+                 "persona_reviewed",
+                 lambda: review_service.get_reviewed_persona_updates(
+-                    bounded_limit,
++                    bounded_limit or 50,
+                     max(0, offset),
+                     status_filter,
+                 ),
+@@ -1019,12 +1034,18 @@
+                     self._load_pending_jargon_reviews(
+                         jargon_service,
+                         keyword=jargon_keyword,
+-                        limit=min(bounded_limit, 50),
++                        limit=min(bounded_limit, 50) if bounded_limit else 200,
+                     )
+                 ),
+                 errors,
+                 default={"jargon_list": [], "total": 0},
+             ),
++            self._safe_section(
++                "affection_reviews",
++                lambda: affection_service.list_reviews("all"),
++                errors,
++                default=[],
++            ),
+         )
+ 
+         return {
+@@ -1032,6 +1053,11 @@
+             "persona_reviewed": reviewed,
+             "style_reviews": style_reviews,
+             "jargon_pending": pending_jargon,
++            "affection_reviews": {"reviews": affection, "total": len(affection)},
++            "pending_total": (
++                int(pending.get("total", 0)) + int(pending_jargon.get("total", 0))
++                + sum(row["status"] == "pending" for row in affection)
++            ),
+             "errors": errors,
+         }
+ 
+--- a/pages/dashboard/app.js
++++ b/pages/dashboard/app.js
+@@ -27,6 +27,9 @@
+     dashboard: null,
+     overview: null,
+     pageData: {},
++    pageLoadedAt: {},
++    pageRequests: {},
++    profileDirty: false,
+     selectedReviews: {
+       persona: new Set(),
+       style: new Set(),
+@@ -322,7 +325,7 @@
+   }
+ 
+   function reviewSearchParams() {
+-    const params = { limit: 50 };
++    const params = { limit: 0 };
+     const personaKeyword = $("persona-review-keyword")?.value?.trim() || "";
+     const styleKeyword = $("style-review-keyword")?.value?.trim() || "";
+     const jargonKeyword = $("jargon-review-keyword")?.value?.trim() || "";
+@@ -346,9 +349,15 @@
+   }
+ 
+   function refreshSelectionLabels() {
++    const data = state.pageData.reviews || {};
++    const totals = {
++      persona: Math.max(0, Number(data.persona_pending?.total || 0) - Number(data.persona_pending?.source_counts?.style_learning || 0)),
++      style: data.style_reviews?.total,
++      jargon: data.jargon_pending?.total,
++    };
+     ["persona", "style", "jargon"].forEach((kind) => {
+       const ids = visibleReviewIds(kind);
+-      setText(`${kind}-review-count`, reviewCountText(kind, ids.length));
++      setText(`${kind}-review-count`, reviewCountText(kind, Number(totals[kind] ?? ids.length)));
+     });
+     setText("expression-review-count", t("selection.selectedCount", "已选 {count}").replace("{count}", fmt(selectedReviewIds("style").length, 0)));
+     const selectedJargon = Array.from(state.selectedJargon).filter(Boolean).length;
+@@ -490,13 +499,13 @@
+   }
+ 
+   async function loadDashboard(force = false) {
+-    if (state.dashboard && !force) {
++    if (state.dashboard && !force && Date.now() - (state.pageLoadedAt.dashboard || 0) < 60_000) {
+       renderDashboard(state.dashboard);
+       return state.dashboard;
+     }
+     setBusy(t("status.syncing", "同步中"));
+     try {
+-      const data = await apiGet("dashboard");
++      const data = await cached("dashboard", () => apiGet("dashboard"), force);
+       state.dashboard = data;
+       state.overview = data.overview || data;
+       renderDashboard(data);
+@@ -538,10 +547,14 @@
+   }
+ 
+   async function cached(key, loader, force) {
+-    if (!force && state.pageData[key]) return state.pageData[key];
++    if (!force && state.pageData[key] && Date.now() - (state.pageLoadedAt[key] || 0) < 60_000) return state.pageData[key];
++    const token = (state.pageRequests[key] || 0) + 1;
++    state.pageRequests[key] = token;
+     setBusy(t("status.loading", "加载中"));
+     const data = await loader();
++    if (state.pageRequests[key] !== token) return state.pageData[key] || data;
+     state.pageData[key] = data;
++    state.pageLoadedAt[key] = Date.now();
+     if (key.startsWith("reviews:")) state.pageData.reviews = data;
+     if (key.startsWith("style:")) state.pageData.style = data;
+     return data;
+@@ -673,10 +686,7 @@
+     if ((overview.runtime || {}).database_degraded) {
+       push("warn", t("insights.databaseDegraded", "数据库处于降级状态"), (overview.runtime || {}).database_error || t("insights.databaseNotReady", "数据库服务未完整启动。"), "monitoring");
+     }
+-    const pendingPersona = ((reviews.persona_pending || {}).updates || []).length;
+-    const pendingStyle = ((reviews.style_reviews || {}).reviews || []).length;
+-    const pendingJargon = (((reviews.jargon_pending || {}).jargon_list) || []).length;
+-    const totalBacklog = pendingPersona + pendingStyle + pendingJargon;
++    const totalBacklog = Number(reviews.pending_total || 0);
+     if (totalBacklog > 0) {
+       push("action", t("insights.reviewBacklog", "审查队列有积压"), t("insights.reviewBacklogDetail", "当前有 {count} 条学习结果等待确认。").replace("{count}", fmt(totalBacklog, 0)), "reviews");
+     }
+@@ -885,30 +895,48 @@
+   }
+ 
+   function renderReviews(data) {
++    if (state.profileDirty) return;
+     const personaPending = ((data.persona_pending || {}).updates || [])
+       .filter((item) => item && item.review_source !== "style_learning");
+     const personaReviewed = ((data.persona_reviewed || {}).updates || []);
+     const styleReviews = ((data.style_reviews || {}).reviews || []);
+     const pendingJargon = (((data.jargon_pending || {}).jargon_list) || []);
++    const affection = ((data.affection_reviews || {}).reviews || []);
++    const affectionPending = affection.filter(item => item.status === "pending");
++    const affectionStale = affection.filter(item => item.status === "stale");
++    setText("affection-review-count", `待处理 ${affectionPending.length} · 失效 ${affectionStale.length}`);
++    setHtml("affection-review-list", affectionPending.map(affectionReviewHtml).join("") || empty("暂无有效待审建议"));
++    setHtml("affection-review-history", affection.filter(item => item.status !== "pending").map(affectionReviewHtml).join("") || empty("暂无失效建议或处理历史"));
+     pruneSelection(selectedReviewSet("persona"), personaPending.map((item) => item.id));
+     pruneSelection(selectedReviewSet("style"), styleReviews.map((item) => item.id));
+     pruneSelection(selectedReviewSet("jargon"), pendingJargon.map((item) => item.id));
+-    setText("persona-review-count", reviewCountText("persona", personaPending.length));
+-    setText("style-review-count", reviewCountText("style", styleReviews.length));
+-    setText("jargon-review-count", reviewCountText("jargon", pendingJargon.length));
++    refreshSelectionLabels();
+     setText("reviewed-count", fmt(personaReviewed.length, 0));
+     setHtml("persona-review-list", personaPending.map((item) => personaReviewHtml(item)).join("") || empty(t("empty.personaUpdates", "暂无人格更新")));
+     setHtml("style-review-list", styleReviews.map((item) => styleReviewHtml(item)).join("") || empty(t("empty.styleReviews", "暂无表达审查")));
+     setHtml("jargon-review-list", pendingJargon.map((item) => jargonReviewHtml(item)).join("") || empty(t("empty.jargonCandidates", "暂无黑话候选")));
+     state.pageData.lastStyleItems = styleReviews;
+-    setHtml("reviewed-persona-list", personaReviewed.slice(0, 12).map((item) => `
++    setHtml("reviewed-persona-list", personaReviewed.map((item) => `
+       <div class="table-row">
+         <span>${escapeHtml(item.id)}</span>
+         <strong>${escapeHtml(item.status || item.review_status || "reviewed")}</strong>
+-        <small>${escapeHtml(item.reason || item.update_type || item.review_source || "")}</small>
++        <small>${escapeHtml(item.stale_reason || item.reason || item.update_type || item.review_source || "")}</small>
+       </div>
+     `).join("") || empty(t("empty.reviewed", "暂无已审查记录")));
+     showErrors(data.errors || {});
++  }
++
++  function affectionReviewHtml(item) {
++    const pending = item.status === "pending";
++    const labels = { pending: "待审", stale: "依据已变化", approved: "已通过", rejected: "已驳回" };
++    return `<article class="review-item"><div class="review-main">
++      <strong>QQ ${escapeHtml(item.user_id)}：${escapeHtml(item.before)} → ${escapeHtml(item.after)}</strong>
++      <small>群／会话 ${escapeHtml(item.group_id)} · ${escapeHtml(labels[item.status] || item.status)}</small>
++      <p>${escapeHtml(item.reason || "")}</p><blockquote>${escapeHtml(item.message || "")}</blockquote>
++      ${item.stale_reason ? `<p>${escapeHtml(item.stale_reason)}</p>` : ""}
++      </div><div class="row-actions">${pending ?
++        button("通过", `data-review-action="approve" data-kind="affection" data-id="${escapeAttr(item.id)}"`, "solid-button")
++        + button("驳回", `data-review-action="reject" data-kind="affection" data-id="${escapeAttr(item.id)}"`) : ""}</div></article>`;
+   }
+ 
+   function personaReviewHtml(item) {
+@@ -916,9 +944,10 @@
+     return `<article class="review-item selectable">
+       ${reviewCheckbox("persona", id)}
+       <div class="review-main">
+-        <strong>${escapeHtml(item.update_type || item.review_source || t("reviews.personaUpdates", "人格更新"))}</strong>
++        <strong>${escapeHtml(item.title || item.update_type || item.review_source || t("reviews.personaUpdates", "人格更新"))}</strong>
+         <small>${escapeHtml(item.group_id || "default")} · ${escapeHtml(item.reason || item.description || "")}</small>
+         <p>${escapeHtml(item.proposed_content || item.new_content || item.incremental_content || "").slice(0, 220)}</p>
++        ${item.review_source === "qq_profile" ? `<p>原值：${escapeHtml(item.before || "（空）")}</p><label>批准后的值（可修改）<textarea data-profile-value="${escapeAttr(id)}" rows="3">${escapeHtml(item.after || "")}</textarea></label><details><summary>聊天依据</summary>${(item.evidence || []).map(entry => `<blockquote>${escapeHtml(entry.text || "")}</blockquote>`).join("")}</details>` : ""}
+       </div>
+       <div class="row-actions">
+         ${button(t("actions.details", "详情"), `data-review-action="detail" data-kind="persona" data-id="${escapeAttr(id)}"`)}
+@@ -1802,6 +1831,7 @@
+   function findReviewItem(kind, id) {
+     const reviews = state.pageData.reviews || {};
+     const style = state.pageData.style || {};
++    if (kind === "affection") return ((reviews.affection_reviews || {}).reviews || []).find(item => String(item.id) === String(id));
+     if (kind === "persona") return ((reviews.persona_pending || {}).updates || []).find((item) => String(item.id) === String(id));
+     if (kind === "style") {
+       return (
+@@ -1818,10 +1848,18 @@
+       return;
+     }
+     let payload;
+-    if (kind === "persona") {
++    if (kind === "affection") {
++      if (!['approve', 'reject'].includes(action)) return;
++      if (!await showConfirm("确认好感度审批", "仅处理这条建议；通过后才修改好感度。", action === "approve" ? "通过" : "驳回")) return;
++      payload = { action: "affection_review", id, decision: action };
++    } else if (kind === "persona") {
+       payload = action === "delete"
+         ? { action: "delete", id }
+         : { action: "review", id, decision: action };
++      if (action === "approve" && findReviewItem(kind, id)?.review_source === "qq_profile") {
++        const editor = Array.from(document.querySelectorAll('[data-profile-value]')).find(element => element.dataset.profileValue === String(id));
++        if (editor) payload.modified_content = editor.value;
++      }
+     } else if (kind === "style") {
+       payload = { action: `style_${action}`, id };
+     } else {
+@@ -1829,7 +1867,10 @@
+     }
+     const result = await apiPost("reviews/action", payload);
+     showToast(result.message || t("messages.actionDone", "操作完成"), result.success ? "ok" : "error");
+-    selectedReviewSet(kind).delete(normalizeId(id));
++    if (!result.success) return;
++    state.profileDirty = false;
++    state.dashboard = null;
++    if (kind !== "affection") selectedReviewSet(kind).delete(normalizeId(id));
+     state.pageData.reviews = null;
+     await loadPageData(state.page, { force: true });
+   }
+@@ -2731,6 +2772,23 @@
+       await bridgeReady();
+       setI18nFromBridge();
+       navigateToPage(resolvePageFromHash(), { skipHash: true, force: true });
++      document.addEventListener("input", event => {
++        if (event.target.matches?.('[data-profile-value]')) state.profileDirty = true;
++      });
++      const refreshVisible = () => {
++        if (document.hidden || state.profileDirty || $("detail-modal")?.open
++          || document.activeElement?.matches("input, textarea, select")
++          || Object.values(state.selectedReviews).some(selected => selected.size)) return;
++        if (["home", "insights", "reviews", "expression-learning"].includes(state.page)) {
++          void loadPageData(state.page, { force: true });
++        }
++      };
++      const refreshTimer = window.setInterval(refreshVisible, 60_000);
++      window.addEventListener("focus", refreshVisible);
++      window.addEventListener("pagehide", () => {
++        window.clearInterval(refreshTimer);
++        window.removeEventListener("focus", refreshVisible);
++      }, { once: true });
+     } catch (error) {
+       showToast(error.message || String(error), "error");
+       setText("runtime-status", t("status.bridgeFailed", "桥接失败"));
+--- a/pages/dashboard/index.html
++++ b/pages/dashboard/index.html
+@@ -215,6 +215,12 @@
+               <div class="review-list" id="jargon-review-list"></div>
+             </div>
+           </div>
++          <div class="panel">
++            <div class="panel-heading"><h3>好感度审批</h3><span class="mini-badge" id="affection-review-count">加载中</span></div>
++            <p>与独立 WebUI 共用审批记录；原数值已变化的建议单独显示，不计入待处理。时间久不代表失效。</p>
++            <div class="review-list" id="affection-review-list"></div>
++            <details><summary>失效建议与处理历史</summary><div class="review-list" id="affection-review-history"></div></details>
++          </div>
+           <div class="panel reviewed-panel">
+             <div class="panel-heading">
+               <h3 data-i18n="reviews.recentReviewed">最近已审查</h3>
+--- a/services/learning/affection_review.py
++++ b/services/learning/affection_review.py
+@@ -4,7 +4,7 @@
+ import json
+ import time
+ 
+-from sqlalchemy import func, select, update
++from sqlalchemy import and_, func, select, update
+ 
+ from ...models.orm.affection import AffectionInteraction, AffectionReview, UserAffection
+ 
+@@ -42,19 +42,64 @@
+             return record.id
+ 
+     async def list_reviews(self, status: str = "pending") -> list[dict]:
++        """Expose validity without changing stored decisions or evidence.
++
++        Args:
++            status: Effective review status to select, or ``all`` for history.
++
++        Returns:
++            Reviews classified against the current value and per-user limit.
++        """
+         async with self.db.get_session() as session:
+-            query = select(AffectionReview).order_by(AffectionReview.created_at.desc())
++            query = (
++                select(AffectionReview, UserAffection.affection_level)
++                .outerjoin(
++                    UserAffection,
++                    and_(
++                        UserAffection.group_id == AffectionReview.group_id,
++                        UserAffection.user_id == AffectionReview.user_id,
++                    ),
++                )
++                .order_by(AffectionReview.created_at.desc())
++            )
+             if status != "all":
+-                query = query.where(AffectionReview.status == status)
+-            records = (await session.scalars(query)).all()
+-            return [{
+-                "id": row.id, "group_id": row.group_id, "user_id": row.user_id,
+-                "before": row.previous_level, "after": row.proposed_level,
+-                "change": row.proposed_level - row.previous_level,
+-                "reason": row.reason, "message": row.message, "mood": row.mood,
+-                "status": row.status, "created_at": row.created_at,
+-                "reviewed_at": row.reviewed_at,
+-            } for row in records]
++                query = query.where(
++                    AffectionReview.status == ("pending" if status == "stale" else status)
++                )
++            records = (await session.execute(query)).all()
++            result = []
++            maximum = int(self.config.max_user_affection)
++            for row, current in records:
++                current = current or 0
++                stale_reason = ""
++                if row.status == "pending":
++                    if current != row.previous_level:
++                        stale_reason = f"当前好感度为 {current}，建议依据为 {row.previous_level}；原数值已变化，不能直接批准。"
++                    elif not 0 <= row.proposed_level <= maximum:
++                        stale_reason = "建议值超出当前好感度上限，不能直接批准。"
++                effective_status = "stale" if stale_reason else row.status
++                if status != "all" and status != effective_status:
++                    continue
++                result.append(
++                    {
++                        "id": row.id,
++                        "group_id": row.group_id,
++                        "user_id": row.user_id,
++                        "before": row.previous_level,
++                        "after": row.proposed_level,
++                        "change": row.proposed_level - row.previous_level,
++                        "reason": row.reason,
++                        "message": row.message,
++                        "mood": row.mood,
++                        "status": effective_status,
++                        "stored_status": row.status,
++                        "current_level": current,
++                        "stale_reason": stale_reason,
++                        "created_at": row.created_at,
++                        "reviewed_at": row.reviewed_at,
++                    }
++                )
++            return result
+ 
+     async def decide(self, review_id: int, action: str) -> tuple[bool, str]:
+         """Apply exactly the reviewed value; reject stale snapshots and double clicks."""
+--- a/tests/unit/test_learning_approval_gate.py
++++ b/tests/unit/test_learning_approval_gate.py
+@@ -10,7 +10,7 @@
+ from sqlalchemy import select
+ 
+ from self_learning_EterU.config import PluginConfig
+-from self_learning_EterU.models.orm.affection import AffectionInteraction, UserAffection
++from self_learning_EterU.models.orm.affection import AffectionInteraction, AffectionReview, UserAffection
+ from self_learning_EterU.models.orm.expression import ExpressionPattern
+ from self_learning_EterU.models.orm.jargon import Jargon
+ from self_learning_EterU.models.orm.learning import StyleLearningReview
+@@ -129,11 +129,80 @@
+         review_id = await self.proposal()
+         await self.db.update_user_affection("group-a", "123", 1)
+         self.assertFalse((await self.affection.decide(review_id, "approve"))[0])
+-        self.assertEqual((await self.affection.list_reviews())[0]["status"], "pending")
++        self.assertEqual(await self.affection.list_reviews(), [])
++        self.assertEqual((await self.affection.list_reviews("stale"))[0]["status"], "stale")
+         review_id = await self.proposal(user="456")
+         self.config.max_total_affection = 1
+         self.assertFalse((await self.affection.decide(review_id, "approve"))[0])
+         self.assertIsNone(await self.db.get_user_affection("group-a", "456"))
++
++    async def test_stale_classification_preserves_evidence_and_does_not_expire_by_age(self):
++        stale_id = await self.proposal(after=7)
++        approved_id = await self.proposal(after=5)
++        valid_id = await self.proposal(user="456")
++        async with self.db.get_session() as session:
++            valid = await session.get(AffectionReview, valid_id)
++            valid.created_at = 1
++            await session.commit()
++        self.assertTrue((await self.affection.decide(approved_id, "approve"))[0])
++        self.assertEqual([row["id"] for row in await self.affection.list_reviews()], [valid_id])
++        stale = await self.affection.list_reviews("stale")
++        self.assertEqual([row["id"] for row in stale], [stale_id])
++        self.assertEqual(stale[0]["current_level"], 5)
++        self.assertTrue(stale[0]["stale_reason"])
++        self.assertEqual(len(await self.affection.list_reviews("all")), 3)
++        async with self.db.get_session() as session:
++            record = await session.get(AffectionReview, stale_id)
++            self.assertEqual(record.status, "pending")
++            self.assertEqual(record.message, "辛苦啦")
++
++    async def test_embedded_and_standalone_queues_share_decisions(self):
++        from self_learning_EterU.core.page_api import PluginPageApi
++        from self_learning_EterU.webui.compat import Quart
++        from self_learning_EterU.webui.blueprints import persona_reviews
++        from self_learning_EterU.webui.middleware import auth
++
++        container = SimpleNamespace(database_manager=self.db, plugin_config=self.config)
++        persona = SimpleNamespace(
++            get_pending_persona_updates=AsyncMock(return_value={"updates": [], "total": 2}),
++            get_reviewed_persona_updates=AsyncMock(return_value={"updates": [], "total": 0}),
++        )
++        learning = SimpleNamespace(get_style_learning_reviews=AsyncMock(
++            return_value={"reviews": [], "total": 2}))
++        api = PluginPageApi(SimpleNamespace())
++        api._container = lambda: container
++        api._imports = lambda: SimpleNamespace(
++            PersonaReviewService=lambda _: persona, LearningService=lambda _: learning,
++            JargonService=lambda _: object(),
++        )
++        api._load_pending_jargon_reviews = AsyncMock(return_value={"jargon_list": [], "total": 0})
++        first = await self.proposal(after=5)
++        stale = await self.proposal(after=7)
++        second = await self.proposal(user="456")
++        app = Quart("queue-sync-tests")
++        app.register_blueprint(persona_reviews.persona_reviews_bp)
++        with patch.object(persona_reviews, "get_container", return_value=container), \
++             patch.object(auth, "get_container", return_value=container):
++            client = app.test_client(client=("127.0.0.1", 50000))
++            before = await api._load_reviews(limit=0)
++            self.assertEqual(persona.get_pending_persona_updates.await_args.kwargs["limit"], 0)
++            self.assertEqual(learning.get_style_learning_reviews.await_args.kwargs["limit"], 0)
++            self.assertEqual(persona.get_reviewed_persona_updates.await_args.args[0], 50)
++            self.assertEqual(before["pending_total"], 5)
++            api._body = AsyncMock(return_value={"action": "affection_review", "id": first})
++            self.assertFalse((await api.post_reviews_action())["data"]["success"])
++            api._body = AsyncMock(return_value={"action": "affection_review", "id": first, "decision": "approve"})
++            self.assertTrue((await api.post_reviews_action())["data"]["success"])
++            web = await (await client.get("/api/affection_reviews?status=all")).get_json()
++            native = await api._load_reviews()
++            self.assertEqual(web["reviews"], native["affection_reviews"]["reviews"])
++            self.assertEqual(native["pending_total"], 3)
++            self.assertEqual(next(row for row in web["reviews"] if row["id"] == stale)["status"], "stale")
++            response = await client.post(f"/api/affection_reviews/{second}/review", json={"action": "reject"})
++            self.assertEqual(response.status_code, 200)
++            native = await api._load_reviews()
++            self.assertEqual(native["pending_total"], 2)
++            self.assertEqual(next(row for row in native["affection_reviews"]["reviews"] if row["id"] == second)["status"], "rejected")
+ 
+     async def test_approval_transaction_rolls_back_on_history_failure(self):
+         review_id = await self.proposal()
+--- a/web_src/src/components/business/LearningApprovalPanel.test.tsx
++++ b/web_src/src/components/business/LearningApprovalPanel.test.tsx
+@@ -1,12 +1,14 @@
+-import { fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
+-import { beforeEach, expect, it, vi } from 'vitest';
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
++import { afterEach, beforeEach, expect, it, vi } from 'vitest';
+ import { LearningApprovalPanel } from './LearningApprovalPanel';
+ 
+-const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), confirm: vi.fn(), toast: vi.fn() }));
++const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), confirm: vi.fn(), toast: vi.fn(), refresh: vi.fn() }));
+ vi.mock('../../services/api', () => ({ api: { get: mocks.get, post: mocks.post } }));
+ vi.mock('../../stores/dashboard', () => ({ useDashboard: () => ({
+-  lastUpdated: () => null, confirm: mocks.confirm, toast: mocks.toast,
++  lastUpdated: () => null, confirm: mocks.confirm, toast: mocks.toast, refresh: mocks.refresh,
+ }) }));
++
++afterEach(cleanup);
+ 
+ beforeEach(() => {
+   vi.clearAllMocks();
+@@ -25,6 +27,23 @@
+   expect(mocks.post).not.toHaveBeenCalled();
+   fireEvent.click(screen.getByText('通过'));
+   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/affection_reviews/7/review', { action: 'approve' }));
++  await waitFor(() => expect(mocks.refresh).toHaveBeenCalledWith(true));
++});
++
++it('keeps stale evidence in history without offering approval', async () => {
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: true, groups: [] }
++    : { reviews: [{ id: 8, user_id: '123', group_id: '456', before: 10, after: 15,
++      change: 5, reason: 'Earlier proposal', message: 'Evidence retained',
++      status: 'stale', stale_reason: 'Current value changed', created_at: 1 }] });
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText(/失效 1/);
++  expect(screen.queryByText('Evidence retained')).not.toBeInTheDocument();
++  fireEvent.click(screen.getByText('显示处理历史与失效建议'));
++  await screen.findByText('Evidence retained');
++  expect(screen.getByText('Current value changed')).toBeInTheDocument();
++  expect(screen.queryByText('通过')).not.toBeInTheDocument();
++  expect(mocks.post).not.toHaveBeenCalled();
+ });
+ 
+ it('does not apply a change if the owner cancels confirmation', async () => {
+--- a/web_src/src/components/business/LearningApprovalPanel.tsx
++++ b/web_src/src/components/business/LearningApprovalPanel.tsx
+@@ -8,6 +8,7 @@
+ type Change = {
+   id: number; group_id: string; user_id: string; before: number; after: number;
+   change: number; reason: string; message: string; status: string; created_at: number;
++  stale_reason?: string; current_level?: number;
+ };
+ type Status = { require_approval?: boolean; learning_interval_hours?: number; min_messages?: number; groups?: string[] };
+ 
+@@ -19,15 +20,18 @@
+   const [metrics, setMetrics] = createSignal<Record<string, unknown>>({});
+   const [showHistory, setShowHistory] = createSignal(false);
+   const [busy, setBusy] = createSignal(false);
++  let loadToken = 0;
+   const loadMetrics = async (value: string) => {
+     if (value) setMetrics(await api.get(`/api/affection_metrics?${new URLSearchParams({ group_id: value })}`));
+   };
+   const load = async () => {
++    const token = ++loadToken;
+     try {
+       const [state, result] = await Promise.all([
+         api.get<Status>('/api/learning_approval_status'),
+         api.get<{ reviews: Change[] }>('/api/affection_reviews?status=all'),
+       ]);
++      if (token !== loadToken) return;
+       setStatus(state); setRows(result.reviews || []);
+       const selected = group() || state.groups?.[0] || '';
+       setGroup(selected); await loadMetrics(selected);
+@@ -44,25 +48,25 @@
+     setBusy(true);
+     try {
+       await api.post(`/api/affection_reviews/${item.id}/review`, { action });
+-      await load();
+       dashboard.toast(action === 'approve' ? '好感度已更新' : '已驳回，数值未变', 'success');
+     } catch (error) {
+       dashboard.toast(error instanceof Error ? error.message : '操作失败', 'danger');
+-    } finally { setBusy(false); }
++    } finally { await load(); await dashboard.refresh(true); setBusy(false); }
+   };
+   return <>
+     <Panel title="学习审批状态" actions={<Button onClick={load}>刷新</Button>}>
+       <p>{status().require_approval ? '已开启：学习变化先审批，包括好感度涨跌。' : '未开启全部审批，好感度等功能仍可自动变化。'}</p>
+       <p>批次学习间隔 {status().learning_interval_hours ?? '--'} 小时，至少 {status().min_messages ?? '--'} 条消息。没有新建议也可能是未到阈值或没有足够证据。</p>
+-      <p>好感度为 0 的变化不会生成审批；批准时如果数值已变，旧建议会提示过期。临时上下文采集不受影响。</p>
++      <p>好感度为 0 的变化不会生成审批；原数值或上限已变化的建议单独显示，不计入待处理。不会仅因时间久而丢弃建议。</p>
+     </Panel>
+-    <Panel title={`好感度审批（待处理 ${rows().filter(row => row.status === 'pending').length}）`}
+-      actions={<Button onClick={() => setShowHistory(!showHistory())}>{showHistory() ? '只看待处理' : '显示处理历史'}</Button>}>
++    <Panel title={`好感度审批（待处理 ${rows().filter(row => row.status === 'pending').length} · 失效 ${rows().filter(row => row.status === 'stale').length}）`}
++      actions={<Button onClick={() => setShowHistory(!showHistory())}>{showHistory() ? '只看待处理' : '显示处理历史与失效建议'}</Button>}>
+       <For each={rows().filter(row => showHistory() || row.status === 'pending')} fallback={<EmptyState title="暂无好感度建议" />}>
+         {row => <Card>
+           <strong>QQ {row.user_id}：{row.before} → {row.after}（{row.change > 0 ? '+' : ''}{row.change}）</strong>
+           <p>群／会话 {row.group_id} · {formatTime(row.created_at)} · {row.status}</p>
+           <p>{row.reason}</p><blockquote>{row.message}</blockquote>
++          <Show when={row.stale_reason}><p>{row.stale_reason}</p></Show>
+           <Show when={row.status === 'pending'}><div class="inline-actions">
+             <Button disabled={busy()} tone="success" onClick={() => decide(row, 'approve')}>通过</Button>
+             <Button disabled={busy()} tone="warning" onClick={() => decide(row, 'reject')}>驳回</Button>
+--- a/web_src/src/components/business/ReviewCard.tsx
++++ b/web_src/src/components/business/ReviewCard.tsx
+@@ -68,6 +68,7 @@
+         <p>{textOrDash(props.item.definition ?? props.item.meaning ?? props.item.review_detail)}</p>
+       </Show>
+       <Show when={isProfile()}>
++        <Show when={props.item.stale_reason}><p>{textOrDash(props.item.stale_reason)}</p></Show>
+         <p>仅修改此成员的“{textOrDash(props.item.field_label)}”。批准后保存，拒绝则保持原设置。</p>
+         <Show when={pendingProfile()}>
+         <label>审批后的值（可修改）
+--- a/web_src/src/pages/home/HomePage.tsx
++++ b/web_src/src/pages/home/HomePage.tsx
+@@ -2,7 +2,7 @@
+ import { useDashboard } from '../../stores/dashboard';
+ import type { IntegrationItem, PageId, Tone } from '../../types/dashboard';
+ import { formatCount, formatPercent, safeNumber } from '../../lib/format';
+-import { list, jargonPendingTotal, object, reviews } from '../shared';
++import { list, object, reviewPendingCounts } from '../shared';
+ import { Badge, Card } from '../../components/ui';
+ import { PageHeader } from '../../components/layout/PageHeader';
+ import styles from './HomePage.module.scss';
+@@ -43,17 +43,13 @@
+     const trends = object(dashboard.data.trends);
+     const jargon = object(dashboard.data.jargon_stats);
+     const statistics = object(object(dashboard.data.data_statistics).data ?? dashboard.data.data_statistics);
+-    const personaPayload = object(dashboard.data.persona_updates);
+-    const stylePayload = object(dashboard.data.style_learning_reviews);
+-    const personaItems = reviews(dashboard.data, 'persona_updates');
+-    const personaTotal = safeNumber(personaPayload.total, personaItems.length);
+-    const styleTotal = safeNumber(stylePayload.total, reviews(dashboard.data, 'style_learning_reviews').length);
+-    const personaIncludesStyle = personaItems.some((item) => item.review_source === 'style_learning');
+-    const personaPending = personaIncludesStyle ? Math.max(0, personaTotal - styleTotal) : personaTotal;
++    const counts = reviewPendingCounts(dashboard.data);
++    const styleTotal = counts.style;
++    const personaPending = counts.persona;
+     const jargonCandidates = safeNumber(jargon.total_candidates ?? object(jargon.data).total_candidates);
+     const jargonConfirmed = safeNumber(jargon.confirmed_jargon ?? object(jargon.data).confirmed_jargon);
+     // 待审数与审查队列同源：读待审接口的分页 total，已驳回（is_complete）不再计入
+-    const jargonPending = jargonPendingTotal(dashboard.data);
++    const jargonPending = counts.jargon;
+     const contentCount = safeNumber(statistics.style_learning);
+     const graphNodes = safeNumber(statistics.memory) + safeNumber(statistics.knowledge_graph);
+     const integrations = list<IntegrationItem>(
+@@ -66,7 +62,7 @@
+     const filtered = safeNumber(metrics.filtered_messages);
+     const filterRate = totalMessages ? filtered / totalMessages * 100 : 0;
+     const learningEfficiency = safeNumber(metrics.learning_efficiency);
+-    const backlog = personaPending + styleTotal + jargonPending;
++    const backlog = counts.total;
+     const batches = list(trends.recent_batches).length;
+     const llmSummary = object(metrics.llm_call_summary);
+     const llmCalls = safeNumber(llmSummary.total_calls);
+--- a/web_src/src/pages/insights/InsightsPage.tsx
++++ b/web_src/src/pages/insights/InsightsPage.tsx
+@@ -2,7 +2,7 @@
+ import { useDashboard } from '../../stores/dashboard';
+ import type { PageId, Tone } from '../../types/dashboard';
+ import { formatCount } from '../../lib/format';
+-import { metric, jargonPendingTotal, object } from '../shared';
++import { metric, object, reviewPendingCounts } from '../shared';
+ import { Badge, Button, Card, EmptyState } from '../../components/ui';
+ import { PageHeader } from '../../components/layout/PageHeader';
+ import styles from './InsightsPage.module.scss';
+@@ -12,11 +12,7 @@
+ export function InsightsPage() {
+   const dashboard = useDashboard();
+   const insights = createMemo<Insight[]>(() => {
+-    const persona = object(dashboard.data.persona_updates);
+-    const style = object(dashboard.data.style_learning_reviews);
+-    // 与首页待办同源：读待审接口分页 total，已驳回不再计入
+-    const backlog = Number(persona.total || 0) + Number(style.total || 0)
+-      + jargonPendingTotal(dashboard.data);
++    const backlog = reviewPendingCounts(dashboard.data).total;
+     const filtered = metric(dashboard.data, ['metrics.filtered_messages', 'metrics.messages.filtered']);
+     const failures = Object.values(object(object(dashboard.data.health).checks))
+       .filter((item) => object(item).status && object(item).status !== 'healthy').length;
+--- a/web_src/src/pages/reviews/ReviewsPage.tsx
++++ b/web_src/src/pages/reviews/ReviewsPage.tsx
+@@ -1,7 +1,7 @@
+ import { createSignal, For, onMount, Show } from 'solid-js';
+ import { api } from '../../services/api';
+ import { useDashboard } from '../../stores/dashboard';
+-import { list, object, reviews } from '../shared';
++import { list, object, reviews, reviewPendingCounts } from '../shared';
+ import type { ReviewKind, } from '../../components/business/ReviewCard';
+ import { ReviewCard } from '../../components/business/ReviewCard';
+ import { LearningApprovalPanel } from '../../components/business/LearningApprovalPanel';
+@@ -79,6 +79,7 @@
+   return (
+     <div class="page">
+       <PageHeader title="审查队列" description="集中处理人格更新、个人相处设置、表达风格和群聊黑话。个人设置建议只有批准后才写入对应成员。" icon="fact_check" />
++      <p>有效待审共 {reviewPendingCounts(dashboard.data).total} 条（表达不重复计数，失效建议不计入）。AstrBot 内嵌面板与此页使用同一审批服务。</p>
+       <LearningApprovalPanel />
+       <div class={styles['review-columns']}>
+         <For each={Object.keys(config) as ReviewKind[]}>{(kind) =>
+--- a/web_src/src/pages/shared.test.ts
++++ b/web_src/src/pages/shared.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from 'vitest';
+-import { jargonPendingTotal } from './shared';
++import { jargonPendingTotal, reviewPendingCounts } from './shared';
+ import type { DashboardSnapshot } from '../types/dashboard';
+ 
+ describe('jargonPendingTotal', () => {
+@@ -47,3 +47,15 @@
+     expect(jargonPendingTotal(data)).toBe(3);
+   });
+ });
++
++it('counts each approval source once, including affection but excluding stale history', () => {
++  const data = {
++    persona_updates: { total: 8, source_counts: { style_learning: 7, qq_profile: 1 },
++      updates: [{ id: 'style_1', review_source: 'style_learning' }] },
++    style_learning_reviews: { total: 7, reviews: [{ id: 1 }] },
++    jargon_reviews: { total: 2, jargon_list: [{ id: 1 }] },
++    affection_reviews: { reviews: [{ status: 'pending' }, { status: 'pending' },
++      { status: 'stale' }, { status: 'approved' }, { status: 'rejected' }] },
++  } as DashboardSnapshot;
++  expect(reviewPendingCounts(data)).toEqual({ persona: 1, style: 7, jargon: 2, affection: 2, total: 12 });
++});
+--- a/web_src/src/pages/shared.ts
++++ b/web_src/src/pages/shared.ts
+@@ -42,5 +42,19 @@
+   return fallback;
+ };
+ 
++export const reviewPendingCounts = (data: DashboardSnapshot) => {
++  const personaPayload = object(data.persona_updates);
++  const personaRows = reviews(data, 'persona_updates');
++  const personaTotal = safeNumber(personaPayload.total, personaRows.length);
++  const sources = object(personaPayload.source_counts);
++  const includedStyle = safeNumber(sources.style_learning,
++    personaRows.filter(row => row.review_source === 'style_learning').length);
++  const persona = Math.max(0, personaTotal - includedStyle);
++  const style = safeNumber(object(data.style_learning_reviews).total, reviews(data, 'style_learning_reviews').length);
++  const jargon = jargonPendingTotal(data);
++  const affection = reviews(data, 'affection_reviews').filter(row => row.status === 'pending').length;
++  return { persona, style, jargon, affection, total: persona + style + jargon + affection };
++};
++
+ export const labelValueRows = (value: unknown): Array<[string, unknown]> =>
+   Object.entries(object(value)).filter(([, item]) => typeof item !== 'object').slice(0, 12);
+--- a/web_src/src/stores/dashboard.tsx
++++ b/web_src/src/stores/dashboard.tsx
+@@ -102,6 +102,7 @@
+         api.get<UnknownRecord>('/api/persona_updates/reviewed?limit=5'),
+         api.get<UnknownRecord>('/api/data/statistics'),
+         api.get<UnknownRecord>('/api/hub/v1/status'),
++        api.get<UnknownRecord>('/api/affection_reviews?status=all'),
+       ]);
+       if (token !== refreshToken) return;
+       const value = (index: number) => responses[index].status === 'fulfilled'
+@@ -118,6 +119,7 @@
+         jargon_reviews: rawValue(6),
+         jargon_stats: value(7), persona_current: value(8), persona_backups: value(9),
+         persona_reviewed: value(10), data_statistics: value(11), hub_status: value(12),
++        affection_reviews: value(13),
+       }));
+       setLastUpdated(new Date());
+       if (responses.every((item) => item.status === 'rejected')) throw new Error('所有 Dashboard 接口均请求失败');
+--- /dev/null
++++ b/web_src/src/test/embedded-reviews.test.ts
+@@ -0,0 +1,71 @@
++import { readFileSync } from 'node:fs';
++import { fireEvent, waitFor } from '@solidjs/testing-library';
++import { expect, it, vi } from 'vitest';
++
++it('renders shared approvals, refreshes external decisions and protects an edited profile', async () => {
++  const html = readFileSync('../pages/dashboard/index.html', 'utf8');
++  const script = readFileSync('../pages/dashboard/app.js', 'utf8');
++  document.body.innerHTML = html.match(/<body[^>]*>([\s\S]*)<\/body>/i)![1];
++  window.history.replaceState(null, '', '#/reviews');
++  vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1);
++  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
++  let refresh: (() => void) | undefined;
++  const originalInterval = window.setInterval.bind(window);
++  vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
++    if (timeout === 60_000) {
++      refresh = handler as () => void;
++      return 123;
++    }
++    return originalInterval(handler, timeout);
++  }) as typeof window.setInterval);
++  Object.defineProperty(document, 'hidden', { configurable: true, value: false });
++  const rows = [
++    { id: 1, user_id: '123', group_id: '456', before: 0, after: 5, status: 'pending', message: 'A valid interaction' },
++    { id: 2, user_id: '123', group_id: '456', before: 1, after: 3, status: 'stale', stale_reason: 'Base value changed', message: 'Old evidence' },
++  ];
++  const payload = () => ({
++    persona_pending: { updates: [{ id: 'qq_profile_example', title: 'Member setting', review_source: 'qq_profile', before: 'Old setting', after: 'Proposed setting', evidence: [{ text: 'Explicit preference' }] }], total: 1, source_counts: {} },
++    persona_reviewed: { updates: [] }, style_reviews: { reviews: [], total: 0 },
++    jargon_pending: { jargon_list: [], total: 0 }, affection_reviews: { reviews: rows },
++    pending_total: 1 + rows.filter(row => row.status === 'pending').length,
++  });
++  const get = vi.fn(async () => JSON.parse(JSON.stringify(payload())));
++  const post = vi.fn(async (_path: string, body: { id: string; decision: string }) => {
++    rows.find(row => String(row.id) === body.id)!.status = body.decision === 'approve' ? 'approved' : 'rejected';
++    return { success: true, message: 'Saved' };
++  });
++  Object.defineProperty(window, 'AstrBotPluginPage', { configurable: true, value: {
++    ready: async () => ({}), apiGet: get, apiPost: post,
++  } });
++  try {
++    window.eval(script);
++    await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 1 · 失效 1'));
++    expect(document.getElementById('affection-review-history')).toHaveTextContent('Old evidence');
++    expect(document.querySelector('#affection-review-history [data-review-action="approve"]')).toBeNull();
++    expect(post).not.toHaveBeenCalled();
++    fireEvent.click(document.querySelector('[data-kind="affection"][data-review-action="approve"]')!);
++    await waitFor(() => expect(document.getElementById('modal-confirm-ok')).not.toBeNull());
++    expect(post).not.toHaveBeenCalled();
++    fireEvent.click(document.getElementById('modal-confirm-ok')!);
++    await waitFor(() => expect(post).toHaveBeenCalledWith('page/reviews/action', { action: 'affection_review', id: '1', decision: 'approve' }));
++    await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 0 · 失效 1'));
++    rows.push({ id: 3, user_id: '789', group_id: '456', before: 0, after: 2, status: 'pending', message: 'New external suggestion' });
++    refresh!();
++    await waitFor(() => expect(document.getElementById('affection-review-list')).toHaveTextContent('New external suggestion'));
++    rows[2].status = 'rejected';
++    window.dispatchEvent(new Event('focus'));
++    await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 0 · 失效 1'));
++    const editor = document.querySelector('[data-profile-value]') as HTMLTextAreaElement;
++    fireEvent.input(editor, { target: { value: 'Unsaved owner edit' } });
++    const calls = get.mock.calls.length;
++    refresh!();
++    window.dispatchEvent(new Event('focus'));
++    await Promise.resolve();
++    expect(get).toHaveBeenCalledTimes(calls);
++    expect(editor.value).toBe('Unsaved owner edit');
++  } finally {
++    window.dispatchEvent(new Event('pagehide'));
++    vi.restoreAllMocks();
++    document.body.innerHTML = '';
++  }
++});
+--- a/webui/blueprints/persona_reviews.py
++++ b/webui/blueprints/persona_reviews.py
+@@ -42,7 +42,7 @@
+ 
+     container = get_container()
+     status = request.args.get("status", "pending")
+-    if status not in {"all", "pending", "approved", "rejected"}:
++    if status not in {"all", "pending", "stale", "approved", "rejected"}:
+         return jsonify({"error": "Invalid status"}), 400
+     rows = await AffectionReviewService(
+         container.database_manager, container.plugin_config
+--- a/webui/services/persona_review_service.py
++++ b/webui/services/persona_review_service.py
+@@ -772,7 +772,11 @@
+         return {
+             "success": True,
+             "updates": paged_updates,
+-            "total": total
++            "total": total,
++            "source_counts": {
++                source: sum(item.get("review_source") == source for item in all_updates)
++                for source in {item.get("review_source", "unknown") for item in all_updates}
++            },
+         }
+ 
+     @staticmethod

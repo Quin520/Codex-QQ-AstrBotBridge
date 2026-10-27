@@ -1,0 +1,17 @@
+{
+  "upstream_commit": "635fc18eeb84e3c7b58661425359244552286835",
+  "requires": "../updates-20261026/astrbot_plugin_proactive_chat.patch",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "core/web_admin_server.py",
+      "before_lf_sha256": "c955cd04396a5e3b79344fc49cca25cb62b26173568b2622a0e7d5140d400c61",
+      "after_lf_sha256": "9a0c1d6cf65306e1903f4abbc801a8421e1867a7ae2b7b0eb2b611df0959929c"
+    },
+    {
+      "path": "tests/test_config_save_consistency.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "52380716fa4d1def08041ee79b03df75db667331a086d485e3ba8c6fad8ab38d"
+    }
+  ]
+}

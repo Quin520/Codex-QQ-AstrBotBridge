@@ -1,0 +1,97 @@
+{
+  "upstream_commit": "9cbe0941da501779932e726f35bb8c17be9de6c7",
+  "requires": "../updates-20261026/astrbot_plugin_self_learning.patch",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "_conf_schema.json",
+      "before_lf_sha256": "0a2f4f8f3ab7120de348ea1536542601faa7f37c34bc90227d94adfeb5b0f1da",
+      "after_lf_sha256": "f3f804c59e4da3a9db1fdcacc8b236f8efa359988234babaade27b29d62041b1"
+    },
+    {
+      "path": "core/page_api.py",
+      "before_lf_sha256": "aaf96c97d41a29649b0098afb9e08eb1495efc6dba4ace82609a9a8d692ab378",
+      "after_lf_sha256": "c2127d2c60edfb9e154fbd4ae5313ec38294fc335166a1670231850207d4d832"
+    },
+    {
+      "path": "pages/dashboard/app.js",
+      "before_lf_sha256": "6118083c1c9ae9801ceb7d0e3e43dce59d6cced4e0c33aee41b52a4ada2c3a50",
+      "after_lf_sha256": "9ff8d7cc0c287599f04cda65d3ea0dd4757c2e0879453f5da7fa666b33ec879a"
+    },
+    {
+      "path": "pages/dashboard/index.html",
+      "before_lf_sha256": "21bf31532113e0da07388fa10245c0b7d79f917e1a87480e933886cb0be7c501",
+      "after_lf_sha256": "468f0859099f15ffd1ebda6ae1d12f71429805718730ea3c008aec37b144d407"
+    },
+    {
+      "path": "services/learning/affection_review.py",
+      "before_lf_sha256": "e7616f8890a972215d561a0cf495b341eb821c4d556b66996071cbca79877073",
+      "after_lf_sha256": "da20f040bb8956c12f1f5384e709760f86236709957110788b0c10ef072b06de"
+    },
+    {
+      "path": "tests/unit/test_learning_approval_gate.py",
+      "before_lf_sha256": "4fc64a184d0c37ec47ebb801d111c8865ce55a87fbd97f9932bd591b425de5bd",
+      "after_lf_sha256": "890c888a8f14619eb7bcbd610fe0295e5842b84f771cb0cffe68f6de1fb1928f"
+    },
+    {
+      "path": "web_src/src/components/business/LearningApprovalPanel.test.tsx",
+      "before_lf_sha256": "1a52b581b7c1449d944ee2851b878bd89506cc53d5c8e4d8d840981ea3d0e6a9",
+      "after_lf_sha256": "b2f244be2cf5184090be7b932710cea33bd2c722c5d21b24e449eabb0ae79163"
+    },
+    {
+      "path": "web_src/src/components/business/LearningApprovalPanel.tsx",
+      "before_lf_sha256": "6f7b71a8bd1fe581f6e77d0ba501363ce7d7d9c9795afb5a8d3829971b071bc5",
+      "after_lf_sha256": "e7d3321a1cce2e9417aa6319fed2adea95c4fee3acb717ca6a7e6c0648cb6617"
+    },
+    {
+      "path": "web_src/src/components/business/ReviewCard.tsx",
+      "before_lf_sha256": "476eca66168b8b8ff5a2b774564ddd4f9d69f940b5d30cc3664f07ec8dc8c69f",
+      "after_lf_sha256": "c3a3aa555940e1b3e9e870cb1510f7fad90fa4792cc9a5f35a346702ae79ba06"
+    },
+    {
+      "path": "web_src/src/pages/home/HomePage.tsx",
+      "before_lf_sha256": "d9d50981fb5f4d9f590262e123d44504de7493b25daf1d52b3fed936c278c2ac",
+      "after_lf_sha256": "d6a71989d98bdb87e9d17929b4f32e8cd063f59bd45587a80f8c1f6015c7990a"
+    },
+    {
+      "path": "web_src/src/pages/insights/InsightsPage.tsx",
+      "before_lf_sha256": "dea520f4af35ea5026186c2c67b9b60af2a482658c2f59a66f05dc3bef8251a8",
+      "after_lf_sha256": "4fa588a5895cf4a2c49af0de3bf323e91ef89b6b55a95e86f25d013a5fb79c0c"
+    },
+    {
+      "path": "web_src/src/pages/reviews/ReviewsPage.tsx",
+      "before_lf_sha256": "d05ae0a2381abb2a3ac232623575216dc2fd7d48ae82f8eb3791b0d0d30dbc9e",
+      "after_lf_sha256": "a097679ffdf405dcf964edd49c4de99e14b1314e8d175e779016dd8e47c530b4"
+    },
+    {
+      "path": "web_src/src/pages/shared.test.ts",
+      "before_lf_sha256": "2b34757a06fd6ed55676abc96e541599452fb9e27aeeaeb56a29a85b47601a66",
+      "after_lf_sha256": "d53cd34c211cfd9f594cf0df2086017c20b1489b2e8bc7920538a437cc713047"
+    },
+    {
+      "path": "web_src/src/pages/shared.ts",
+      "before_lf_sha256": "8819d52fdb0ce6e41a26c8f30e97dc345fd41744e80a9e4d57ea0934b89f22e1",
+      "after_lf_sha256": "c06c2d192d4c7967e65f03dd3792e79efd5157904385a560e3509110f099cdce"
+    },
+    {
+      "path": "web_src/src/stores/dashboard.tsx",
+      "before_lf_sha256": "af8a2f66ebcaaba0cd6b6faf74c73c42826db76f052465f33e2a37f5fc78e4e5",
+      "after_lf_sha256": "9cb9562c1d1a5de3af84706c56397a1a12e6c020332b6faccbe9a43ddc3fe8c1"
+    },
+    {
+      "path": "web_src/src/test/embedded-reviews.test.ts",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "48208075531c67e3a8159beb6e8e98f1e5e24df244e14eb86ea2258a66beab3c"
+    },
+    {
+      "path": "webui/blueprints/persona_reviews.py",
+      "before_lf_sha256": "7fc3b9158c0940f19d1c0ed09b0eebc826d2660330243a33ff5d76eb11f679b5",
+      "after_lf_sha256": "543de6f322b2a0d68478c9d3e3b21a43a239fbb934d2def3291ea0cabc4b7860"
+    },
+    {
+      "path": "webui/services/persona_review_service.py",
+      "before_lf_sha256": "52a2dfed30826465e2ab3ba60077c7e992d7f58c0b47a5d9b21630fe4781177c",
+      "after_lf_sha256": "2c56803eca559613f2281de237c697d0df8216247ab7cf39c5f221ab0f9c4b7e"
+    }
+  ]
+}
