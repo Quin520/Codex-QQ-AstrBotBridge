@@ -1,7 +1,7 @@
 name: astrbot_plugin_local_codex
 display_name: 本机 Codex 桥接
 desc: 本机 Codex 接入 AstrBot，支持群公共上下文、视频摘要、生图、按需语音、角色音色翻唱与 QQ 个性化。
-version: v0.3.22
+version: v0.3.23
 author: Quin520
 repo: https://github.com/Quin520/Codex-QQ-AstrBotBridge
 astrbot_version: ">=4.29.1,<5"

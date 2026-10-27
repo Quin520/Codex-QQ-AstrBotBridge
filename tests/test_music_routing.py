@@ -211,7 +211,7 @@ class MusicRoutingTests(unittest.IsolatedAsyncioTestCase):
                 plugin.music_routing = (
                     self.routing
                     if use_routing
-                    else SimpleNamespace(route=lambda _: False)
+                    else SimpleNamespace(route=lambda _, **kwargs: False)
                 )
                 plugin.cover_sources = SimpleNamespace(discard=lambda _: None)
                 handlers = [

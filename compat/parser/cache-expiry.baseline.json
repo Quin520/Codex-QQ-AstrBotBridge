@@ -1,0 +1,25 @@
+{
+  "baseline": "parser 1.6.1 plus updates-20261026 cumulative adaptation",
+  "files": {
+    "core/clean.py": {
+      "before_sha256": "4a7046e1f33f0818ccbb23868c882566590d2fbd848f83c6c7bc778a046227fb",
+      "after_sha256": "aba871f45c1403bb7a8b9abe7aba4ee53f3669169afac62f23f9a194527d3765"
+    },
+    "core/download.py": {
+      "before_sha256": "e56699ef39522044173da52bb45f05275ada44bb462f63838a92cd8d922199f0",
+      "after_sha256": "30c7399b7eaf6f50f67e1cdbbfa64f3c2677e2541ec587aa9309fd1f6d77ba73"
+    },
+    "core/config.py": {
+      "before_sha256": "ddea726180266244ba980dede4aaec249a4b41c247826ad34e09447a772a3498",
+      "after_sha256": "7af49aafa8725caed782bd76a1442702c0d1cd19dceb3623fe271de9a22a49ae"
+    },
+    "_conf_schema.json": {
+      "before_sha256": "9bd881c8b12459a592747197aa70e0ec13de95eb265518488fee52a8c03e6135",
+      "after_sha256": "08fc4f658d0542b4b9da2f909a00548d460ddef5ae1eb858b8be0c8a8d919bd4"
+    },
+    "tests/test_cache_expiry.py": {
+      "before_sha256": null,
+      "after_sha256": "514b3266cf912eb2e2986bd538078e8fb87927127ac977c8ba5d1d69a2d383a5"
+    }
+  }
+}

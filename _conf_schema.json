@@ -174,6 +174,30 @@
     "hint": "默认 300，范围 60–3600；同群所有成员共享，一次只处理一个请求，失败也保留冷却。",
     "default": 300
   },
+  "media_cache_cleanup_enabled": {
+    "type": "bool",
+    "description": "定期清理临时音频和视频",
+    "hint": "仅清理 AstrBot 临时目录中的过期音频、视频；不遍历模型、表情包、记忆或群语音记录目录。B站播放器和桥接发送副本按各自生命周期即时清理；万能解析器缓存使用其自身的清理配置。",
+    "default": false
+  },
+  "media_cache_retention_hours": {
+    "type": "int",
+    "description": "临时音视频保留小时数",
+    "hint": "默认 24 小时，范围 1–720；按文件最后写入时间计算，锁定文件留待下一次清理。",
+    "default": 24
+  },
+  "media_cache_check_minutes": {
+    "type": "int",
+    "description": "临时音视频清理检查间隔（分钟）",
+    "hint": "默认 60 分钟，范围 10–1440；插件启动时也会检查一次。",
+    "default": 60
+  },
+  "douyin_video_enabled": {
+    "type": "bool",
+    "description": "允许搜索并发送抖音现成视频",
+    "hint": "需启用万能解析器及其抖音解析。给出抖音链接可直接下载发送；关键词由 Codex 联网搜索寻找真实视频页面，因此还需打开联网搜索。每次一个，最大 50 MB、最长 15 分钟（同时遵守解析器更小的时长限制），同一会话间隔 20 秒。不支持图集、直播或绕过访问限制；Cookie 如有需要只填在万能解析器本地设置。",
+    "default": false
+  },
   "image_search_enabled": {
     "type": "bool",
     "description": "允许搜索并发送网络现成图片",

@@ -9,6 +9,8 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.platform import MessageType
 from astrbot.core.message.components import At, Plain
 
+from .douyin_video import DouyinVideoError, normalize_douyin_url
+
 _URL = re.compile(r"https?://[^\s<>\"'，。！？；（）【】]+", re.IGNORECASE)
 _REQUEST = re.compile(
     r"翻唱(?:一下|一遍|一首|这|《)|(?:想听|我要听)"
@@ -35,7 +37,7 @@ class MusicRouting:
     def __init__(self) -> None:
         self._pending: OrderedDict[tuple[str, ...], float] = OrderedDict()
 
-    def route(self, event: AstrMessageEvent) -> bool:
+    def route(self, event: AstrMessageEvent, *, douyin_video: bool = False) -> bool:
         """Remove only this event's link preview handler for music requests.
 
         The caller must first apply the bridge's owner/group authorization.
@@ -44,6 +46,7 @@ class MusicRouting:
 
         Args:
             event: An authorized event handled in AstrBot integration mode.
+            douyin_video: Route direct Douyin links through the enabled video tool.
 
         Returns:
             Whether this is a music link request, even if no parser is active.
@@ -80,6 +83,7 @@ class MusicRouting:
         if re.search(r"(?:不要|别|不用|无需).{0,8}(?:翻唱|唱|播放|点歌)", text):
             explicit = False
         links = []
+        douyin_link_request = False
         for candidate in _URL.finditer(text):
             try:
                 url = urlsplit(candidate.group().rstrip(").,;!"))
@@ -95,6 +99,13 @@ class MusicRouting:
                 and re.fullmatch(r"/video/(?:BV[A-Za-z0-9]{10}|av[0-9]+)/?", url.path)
             ):
                 links.append(candidate)
+            elif douyin_video:
+                try:
+                    normalize_douyin_url(candidate.group().rstrip(").,;!"))
+                except DouyinVideoError:
+                    continue
+                links.append(candidate)
+                douyin_link_request = True
         remainder = text
         for match in reversed(links):
             remainder = remainder[: match.start()] + remainder[match.end() :]
@@ -109,7 +120,7 @@ class MusicRouting:
                 self._pending.popitem(last=False)
         elif text and not followup:
             self._pending.pop(key, None)
-        if not links or not (explicit or followup):
+        if not links or not (explicit or followup or douyin_link_request):
             return False
         handlers = event.get_extra("activated_handlers", [])
         if isinstance(handlers, list):

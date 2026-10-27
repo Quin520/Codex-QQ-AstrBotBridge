@@ -1,6 +1,7 @@
 """Bridge private chat and allowed QQ group mentions to the local Codex CLI."""
 
 import asyncio
+import hashlib
 import json
 from pathlib import Path
 
@@ -9,18 +10,21 @@ from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.provider import ProviderRequest, ProviderType
 from astrbot.api.star import Context, Star, StarTools
 from astrbot.core.agent.tool import ToolSet
-from astrbot.core.message.components import At, Image, Plain
+from astrbot.core.message.components import At, Image, Plain, Video
 from astrbot.core.star.command_management import list_commands, rename_command
 from astrbot.core.star.filter.command import CommandFilter
 from astrbot.core.star.star import StarMetadata
+from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
 from .cover_sources import CoverSources
+from .douyin_video import DouyinVideo
 from .group_context import GroupContext, is_proactive_group
 from .image_generator import ImageGenerator
 from .image_intent import capture_image_request, requests_image_generation
 from .image_search import ImageSearch
 from .integration import configure_provider
+from .media_cache import MediaCacheCleaner
 from .mentions import mentioned_member_instructions
 from .music_routing import MusicRouting
 from .profile_learning import ProfileLearner
@@ -58,6 +62,14 @@ class LocalCodex(Star):
         self.video_context = VideoContext(self.config, self.data_dir)
         self.image_generator = ImageGenerator(self.config, self.data_dir)
         self.image_search = ImageSearch(self.config, self.data_dir)
+        self.media_cache = MediaCacheCleaner(
+            config,
+            Path(get_astrbot_temp_path()),
+            self.data_dir / "media_cache_status.json",
+        )
+        self.douyin_video = DouyinVideo(
+            context, config, self.data_dir, self.video_context
+        )
         self.cover_sources = CoverSources(context, config, self.data_dir)
         self.singing = SingingService(
             context, config, self.data_dir, source_service=self.cover_sources
@@ -89,6 +101,7 @@ class LocalCodex(Star):
         """Register the optional provider without modifying other plugins."""
         self.review_loop = asyncio.get_running_loop()
         await configure_provider(self.context, self.config, self.data_dir)
+        self.media_cache.start()
 
     def _refresh_profiles(self) -> None:
         """Apply approved preferences immediately to subsequent conversations."""
@@ -219,10 +232,23 @@ class LocalCodex(Star):
                 )
         if self.config.get("image_search_enabled", False):
             req.system_prompt += (
-                "\n网络找图：用户说找图、搜图、发张图、想看看某事物时，默认使用 search_web_image，"
+                "\n网络找图：用户想找图、搜图、发张图片或照片时，默认使用 search_web_image，"
                 "它搜索并发送现成图片及来源，一次一张。query 只写图片主题，不包含群聊记录或成员隐私。"
                 "找不到时如实说明，可请用户换关键词；不得偷偷改用生图，也不把搜索图片说成自己画的。"
                 "成功发送后不再补发确认或重复图片。表情包优先使用已有表情包工具。\n"
+            )
+        if self.config.get("douyin_video_enabled", False):
+            req.system_prompt += (
+                "\n抖音视频：用户给出抖音视频或分享短链接时，原样交给 send_douyin_video。"
+                "只有关键词时，先用联网搜索查询 site:douyin.com/video 及关键词，"
+                "找到真实且相关的视频页面后再调用 send_douyin_video；不能编造视频 ID，也不能把搜索页当视频。"
+                "工具会复用已启用的万能解析器下载视频，成功发送到当前会话后结束本轮。"
+                "明确看视频或发视频时不要改发图片、音频或只描述视频。"
+                "B站继续使用 find_in_bilibili(delivery=video) 和 deliver_media。"
+                "用户没指定平台时，B站 HTTP 403/412/429 后可以搜索抖音替代视频并说明来源；"
+                "用户明确指定B站、BV号或确切链接时，失败要说明，不能擅自换成另一段视频。"
+                "抖音下载失败时如实说明，不把卡片、封面或链接声称为已发送的视频；"
+                "同轮不要反复重试，不要求群成员发送 Cookie 或账号密码，不在主动消息中自行发视频。\n"
             )
         if self.config.get("image_generation_enabled", False):
             req.system_prompt += (
@@ -342,7 +368,10 @@ class LocalCodex(Star):
             # ProcessStage enters the default model pipeline when call_llm=False.
             event.should_call_llm(not accepted)
             if accepted:
-                self.music_routing.route(event)
+                self.music_routing.route(
+                    event,
+                    douyin_video=bool(self.config.get("douyin_video_enabled", False)),
+                )
                 event.set_extra("selected_provider", PROVIDER_ID)
                 event.set_extra("enable_streaming", False)
             return
@@ -556,6 +585,41 @@ class LocalCodex(Star):
             if delivered is False or getattr(event, "proactive_send_failed", False):
                 raise RuntimeError("已找到图片，但未确认发送成功。")
 
+    @filter.llm_tool(name="send_douyin_video")
+    async def send_douyin_video(self, event: AstrMessageEvent, url: str):
+        """Download and send one existing Douyin video to the current chat.
+
+        For keywords, first use live web search to find a real douyin.com/video
+        page. For an exact user share link, pass that original link unchanged.
+        Never generates video. Successful delivery ends the turn.
+
+        Args:
+            url(string): One official Douyin video page or v.douyin.com share link; no search pages, local paths or invented IDs.
+        """
+        async with self.douyin_video.prepare(event, url) as (path, title, source):
+            delivered = await event.send(
+                event.chain_result(
+                    [
+                        Video.fromFileSystem(str(path)),
+                        Plain(f"{title}\n来源：{source}"),
+                    ]
+                )
+            )
+            if delivered is False or getattr(event, "proactive_send_failed", False):
+                raise RuntimeError("已下载抖音视频，但未确认发送成功。")
+            self.group_context.observe_parsed_link(
+                event,
+                {
+                    "resource_id": "douyin-"
+                    + hashlib.sha256(source.encode()).hexdigest(),
+                    "url": source,
+                    "platform": "抖音",
+                    "text": "已发送抖音视频，发布者标题："
+                    + title
+                    + "（仅标题，未分析视频内容。）",
+                },
+            )
+
     @filter.llm_tool(name="sing_cover")
     async def sing_cover(self, event: AstrMessageEvent, search_id: str, position: int):
         """Sing a requested song excerpt using the configured character voice.
@@ -590,6 +654,8 @@ class LocalCodex(Star):
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""
         self.image_search.close()
+        self.douyin_video.close()
+        await self.media_cache.stop()
         await self.profile_learner.close()
         await self.image_generator.stop()
         await self.singing.stop()

@@ -12,6 +12,7 @@ PUBLIC_PLUGIN_TOOLS = {
         "send_voice",
         "generate_image",
         "search_web_image",
+        "send_douyin_video",
         "sing_cover",
         "find_cover_music",
     },
@@ -90,6 +91,7 @@ class QQToolPolicy:
                 "send_voice": "voice_enabled",
                 "generate_image": "image_generation_enabled",
                 "search_web_image": "image_search_enabled",
+                "send_douyin_video": "douyin_video_enabled",
                 "sing_cover": "singing_enabled",
                 "find_cover_music": "singing_enabled",
             }.get(tool.name)
