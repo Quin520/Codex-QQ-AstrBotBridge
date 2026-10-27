@@ -253,8 +253,11 @@ class LocalCodex(Star):
         if self.config.get("image_generation_enabled", False):
             req.system_prompt += (
                 "\n生图能力：用户明确要求画图或生成图片时使用 generate_image，"
+                "“生成一张D.Va”等省略‘图’字的请求也是创作请求。"
                 "“来一个自画像”“给我来张你的自画像”也是创作请求，结合已有角色外观生成。"
-                "只生成一张新图片，不支持参考图编辑。普通找图、发图不授权生图；生图工具只在当前消息明确要求时可用。"
+                "用户说‘照这个画’时，将本轮已看到的参考图或上下文中已有的视觉描述写进 prompt，生成一张新图；"
+                "工具只接收文字描述，不直接编辑原图，也不保证精确还原。看不到参考内容时请用户补发图片，不编造外观。"
+                "普通找图、发图不授权生图；生图工具只在当前消息明确要求时可用。"
                 "若措辞不清导致本轮未开放工具，可提示用户说‘画一张…’，不能因此声称生图服务故障或完全没有生图能力。"
                 "不要读取或要求本机路径，不在普通主动发言中自行生图。"
                 "工具成功后图片已发送，不再重复确认或输出本地文件路径；失败时如实说明。\n"
@@ -550,7 +553,9 @@ class LocalCodex(Star):
     async def generate_image(self, event: AstrMessageEvent, prompt: str):
         """Generate and deliver one new image requested by the current user.
 
-        This does not edit reference images or read files. Delivery ends the turn.
+        Describe visible reference details in the prompt when asked to redraw.
+        This creates a new image from text; it does not edit pixels or read files.
+        Delivery ends the turn.
 
         Args:
             prompt(string): Visual description of one new image, at most 1500 characters.

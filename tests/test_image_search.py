@@ -67,6 +67,12 @@ class ImageIntentTests(unittest.TestCase):
             "来张你的照片",
             "你能生图吗？",
             "来个自画像教程",
+            "不要生成一张dva",
+            "别照这个画",
+            "照这个画质找图",
+            "找一张D.Va",
+            "他说“生成一张dva”是什么意思？",
+            "解释一下“照这个画”",
         ]:
             with self.subTest(text=text):
                 self.assertFalse(requests_image_generation(event_for(text)))
@@ -95,6 +101,37 @@ class ImageIntentTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertTrue(requests_image_generation(event_for(text)))
 
+    def test_subject_without_image_noun_and_reference_redraw_are_requests(self):
+        for text in [
+            "生成一张dva",
+            "生成一张 D.Va",
+            "生成张小企鹅",
+            "请生成1张小熊猫",
+            "帮我创作一幅海边的小狗",
+            "照这个画",
+            "照这个重画",
+            "照着这张图画吧",
+            "按照这张照片绘制一下",
+            "参考原图重新画",
+            "根据这张图画",
+        ]:
+            with self.subTest(text=text):
+                self.assertTrue(requests_image_generation(event_for(text)))
+
+    def test_non_image_generation_does_not_authorize_an_image(self):
+        for text in [
+            "生成一张表",
+            "生成一张用户表",
+            "生成一张 SQL 数据表",
+            "生成一张表格",
+            "生成一张空白工作表",
+            "生成一张问卷",
+            "生成一张试卷",
+            "生成一张订单",
+        ]:
+            with self.subTest(text=text):
+                self.assertFalse(requests_image_generation(event_for(text)))
+
     def test_quoted_message_and_augmented_prompt_cannot_authorize(self):
         event = event_for("这是什么意思")
         event.message_obj.message.append(Reply(id="42", chain=[Plain("画一张猫")]))
@@ -103,6 +140,11 @@ class ImageIntentTests(unittest.TestCase):
 
         event = event_for("再来一张")
         event.message_obj.message.append(Reply(id="43", chain=[Plain("来一个自画像")]))
+        self.assertFalse(requests_image_generation(event))
+
+        event = event_for("他说啥")
+        event.message_obj.message.append(Reply(id="44", chain=[Plain("生成一张dva")]))
+        event.message_str += "\n旧对话：照这个画"
         self.assertFalse(requests_image_generation(event))
 
     def test_video_summary_cannot_authorize_after_original_event_was_captured(self):

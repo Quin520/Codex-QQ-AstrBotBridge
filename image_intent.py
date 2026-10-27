@@ -21,6 +21,21 @@ _REQUEST = re.compile(
     r"\b(?:image|picture|photo|art|portrait|wallpaper|illustration|poster)\b",
     re.IGNORECASE,
 )
+# A named subject need not contain an image noun (for example, D.Va).
+_COUNTED_REQUEST = re.compile(
+    r"(?:生成|创作)\s*(?:一|1)?\s*[张幅]\s*(?P<subject>[^，,；;。！？\n]+)"
+)
+_NON_IMAGE_SUBJECT = re.compile(
+    r"表格|数据库|SQL|工作表|报表|清单|问卷|试卷|账单|订单|"
+    r"表(?:单)?(?:吧|呗)?(?:$|\s)",
+    re.IGNORECASE,
+)
+_REFERENCE_REQUEST = re.compile(
+    r"(?:照着?|按照?|根据|参考)\s*"
+    r"(?:(?:这|那)(?:个|张|幅)(?:图(?:片)?|照片|画)?|参考图|原图)\s*"
+    r"(?:来|重新|再|重)?(?:画|绘制)(?:一下)?(?:吧|呗|呀|啊)?"
+    r"(?=$|[\s，,。.!！?？;；:：])"
+)
 _PORTRAIT_REQUEST = re.compile(
     r"(?:^|[\s，,。.!！?？;；:：])(?:请|麻烦)?"
     r"(?:(?:给我|帮我)?(?:来|整|做)|给我)(?:一)?(?:张|幅|个)?"
@@ -52,8 +67,15 @@ def requests_image_generation(event) -> bool:
     )
     text = re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', "", text)
     explicit = _REQUEST.search(text)
+    counted = any(
+        not _NON_IMAGE_SUBJECT.search(match["subject"])
+        for match in _COUNTED_REQUEST.finditer(text)
+    )
+    reference = _REFERENCE_REQUEST.search(text)
     portrait = _PORTRAIT_REQUEST.search(text) and not _EXISTING_IMAGE.search(text)
-    return bool(explicit or portrait) and not _NEGATIVE.search(text)
+    return bool(explicit or counted or reference or portrait) and not _NEGATIVE.search(
+        text
+    )
 
 
 def capture_image_request(event) -> None:

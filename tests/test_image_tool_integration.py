@@ -134,21 +134,30 @@ class ImageToolIntegrationTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await provider.terminate()
 
-    async def test_natural_self_portrait_is_exposed_and_delivered_to_its_requester(
+    async def test_natural_creation_requests_are_exposed_and_delivered_to_requester(
         self,
     ):
-        event = event_for("来一个自画像", "999", "456", "321")
-        event.send = AsyncMock(return_value=None)
-        capture_image_request(event)
-        tool = self.tool()
-        self.assertTrue(self.plugin.tool_policy.allows(event, tool.original))
-        self.plugin.image_generator.generate = AsyncMock(return_value=self.image)
-        self.assertEqual(await self.execute(event, tool), [None])
-        self.plugin.image_generator.generate.assert_awaited_once_with(
-            event, "A small cartoon cat"
-        )
-        event.send.assert_awaited_once()
-        self.assertIsInstance(event.send.call_args.args[0].chain[0], Image)
+        self.config["integrate_plugins"] = True
+        for text in ("来一个自画像", "生成一张dva", "照这个画"):
+            with self.subTest(text=text):
+                event = event_for(text, "999", "456", "321")
+                event.send = AsyncMock(return_value=None)
+                capture_image_request(event)
+                request = ProviderRequest(
+                    prompt=text, func_tool=ToolSet(tools=[self.tool().original])
+                )
+                await self.plugin.personalize_request(event, request)
+                tools = list(request.func_tool)
+                self.assertEqual([tool.name for tool in tools], ["generate_image"])
+                self.plugin.image_generator.generate = AsyncMock(
+                    return_value=self.image
+                )
+                self.assertEqual(await self.execute(event, tools[0]), [None])
+                self.plugin.image_generator.generate.assert_awaited_once_with(
+                    event, "A small cartoon cat"
+                )
+                event.send.assert_awaited_once()
+                self.assertIsInstance(event.send.call_args.args[0].chain[0], Image)
 
     async def test_disabled_feature_and_unauthorized_direct_calls_never_run_worker(
         self,
