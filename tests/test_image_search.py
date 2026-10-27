@@ -60,6 +60,13 @@ class ImageIntentTests(unittest.TestCase):
             "他说“画一张猫”是什么意思？",
             "don't generate an image, search for a cat",
             "no AI generated pictures",
+            "找一张达芬奇的自画像",
+            "来一个自画像，从网上找现成的",
+            "不要来个自画像，找照片就行",
+            "他说“来一个自画像”是什么意思？",
+            "来张你的照片",
+            "你能生图吗？",
+            "来个自画像教程",
         ]:
             with self.subTest(text=text):
                 self.assertFalse(requests_image_generation(event_for(text)))
@@ -74,6 +81,16 @@ class ImageIntentTests(unittest.TestCase):
             "别搜索了，画一张猫",
             "draw a red panda",
             "generate an image of a mountain",
+            "来一个自画像",
+            "来个自画像吧",
+            "给我来张你的自画像",
+            "请给我一幅Q版自画像",
+            "整一个卡通自画像",
+            "来张角色立绘",
+            "做个人设图",
+            "画张猫",
+            "生图，小猫",
+            "生图?",
         ]:
             with self.subTest(text=text):
                 self.assertTrue(requests_image_generation(event_for(text)))
@@ -82,6 +99,10 @@ class ImageIntentTests(unittest.TestCase):
         event = event_for("这是什么意思")
         event.message_obj.message.append(Reply(id="42", chain=[Plain("画一张猫")]))
         event.message_str += "\n旧对话：画一张猫"
+        self.assertFalse(requests_image_generation(event))
+
+        event = event_for("再来一张")
+        event.message_obj.message.append(Reply(id="43", chain=[Plain("来一个自画像")]))
         self.assertFalse(requests_image_generation(event))
 
     def test_video_summary_cannot_authorize_after_original_event_was_captured(self):

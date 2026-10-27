@@ -17,6 +17,7 @@ from astrbot.core.astr_agent_tool_exec import FunctionToolExecutor
 from astrbot.core.message.components import Image
 from astrbot.core.provider.register import llm_tools
 from astrbot_plugin_local_codex.access import PermissionCheckedTool
+from astrbot_plugin_local_codex.image_intent import capture_image_request
 from astrbot_plugin_local_codex.main import LocalCodex
 from astrbot_plugin_local_codex.provider import (
     PROVIDER_ID,
@@ -132,6 +133,22 @@ class ImageToolIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(event.send.call_args.args[0].chain), 1)
         finally:
             await provider.terminate()
+
+    async def test_natural_self_portrait_is_exposed_and_delivered_to_its_requester(
+        self,
+    ):
+        event = event_for("来一个自画像", "999", "456", "321")
+        event.send = AsyncMock(return_value=None)
+        capture_image_request(event)
+        tool = self.tool()
+        self.assertTrue(self.plugin.tool_policy.allows(event, tool.original))
+        self.plugin.image_generator.generate = AsyncMock(return_value=self.image)
+        self.assertEqual(await self.execute(event, tool), [None])
+        self.plugin.image_generator.generate.assert_awaited_once_with(
+            event, "A small cartoon cat"
+        )
+        event.send.assert_awaited_once()
+        self.assertIsInstance(event.send.call_args.args[0].chain[0], Image)
 
     async def test_disabled_feature_and_unauthorized_direct_calls_never_run_worker(
         self,

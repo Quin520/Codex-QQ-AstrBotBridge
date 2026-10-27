@@ -15,12 +15,21 @@ _REQUEST = re.compile(
     r"(?:画|绘制)(?:一|个|只|张|幅|些|几|两|三|出|一下|一个|点)|"
     r"(?:帮我|给我|请你|请|麻烦你|自己)(?:画|绘制)|"
     r"(?:生成|创作)[^。！？\n]{0,40}(?:图|画|照片|壁纸|头像|海报)|"
-    r"(?:^|[\s，。！：])(?:请|帮我|给我|重新|再|开始)?生图(?:$|[\s，。！：])|"
+    r"(?:^|[\s，,。.!！?？;；:：])(?:请|帮我|给我|重新|再|开始)?生图(?:$|[\s，,。.!！?？;；:：])|"
     r"\b(?:draw|paint)\s+(?:me\s+)?(?:a|an|one|some)\b|"
     r"\b(?:generate|create|make)\b[^.!?\n]{0,50}"
     r"\b(?:image|picture|photo|art|portrait|wallpaper|illustration|poster)\b",
     re.IGNORECASE,
 )
+_PORTRAIT_REQUEST = re.compile(
+    r"(?:^|[\s，,。.!！?？;；:：])(?:请|麻烦)?"
+    r"(?:(?:给我|帮我)?(?:来|整|做)|给我)(?:一)?(?:张|幅|个)?"
+    r"(?:你(?:自己)?的)?(?:(?:Q版|卡通|动漫|写实|可爱)的?)?"
+    r"(?:自画像|角色立绘|人设图)(?:吧|呗|看看|谢谢)?"
+    r"(?=$|[\s，,。.!！?？;；:：])",
+    re.IGNORECASE,
+)
+_EXISTING_IMAGE = re.compile(r"搜|找|网上|现成|已有")
 
 
 def requests_image_generation(event) -> bool:
@@ -42,7 +51,9 @@ def requests_image_generation(event) -> bool:
         item.text for item in event.get_messages() if isinstance(item, Plain)
     )
     text = re.sub(r'“[^”]*”|「[^」]*」|『[^』]*』|"[^"\n]*"', "", text)
-    return bool(_REQUEST.search(text)) and not _NEGATIVE.search(text)
+    explicit = _REQUEST.search(text)
+    portrait = _PORTRAIT_REQUEST.search(text) and not _EXISTING_IMAGE.search(text)
+    return bool(explicit or portrait) and not _NEGATIVE.search(text)
 
 
 def capture_image_request(event) -> None:
