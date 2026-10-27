@@ -18,6 +18,8 @@ from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
 from .cover_sources import CoverSources
 from .group_context import GroupContext, is_proactive_group
 from .image_generator import ImageGenerator
+from .image_intent import capture_image_request, requests_image_generation
+from .image_search import ImageSearch
 from .integration import configure_provider
 from .mentions import mentioned_member_instructions
 from .music_routing import MusicRouting
@@ -55,6 +57,7 @@ class LocalCodex(Star):
         )
         self.video_context = VideoContext(self.config, self.data_dir)
         self.image_generator = ImageGenerator(self.config, self.data_dir)
+        self.image_search = ImageSearch(self.config, self.data_dir)
         self.cover_sources = CoverSources(context, config, self.data_dir)
         self.singing = SingingService(
             context, config, self.data_dir, source_service=self.cover_sources
@@ -214,10 +217,17 @@ class LocalCodex(Star):
                     "\n当前朗读已启用固定角色音色：send_voice 会先生成朗读，再用主人配置的 RVC 模型转音色。"
                     "用户要求用自己的声音说话仍调用 send_voice；转换失败不能改发默认原声冒充角色音色。"
                 )
+        if self.config.get("image_search_enabled", False):
+            req.system_prompt += (
+                "\n网络找图：用户说找图、搜图、发张图、想看看某事物时，默认使用 search_web_image，"
+                "它搜索并发送现成图片及来源，一次一张。query 只写图片主题，不包含群聊记录或成员隐私。"
+                "找不到时如实说明，可请用户换关键词；不得偷偷改用生图，也不把搜索图片说成自己画的。"
+                "成功发送后不再补发确认或重复图片。表情包优先使用已有表情包工具。\n"
+            )
         if self.config.get("image_generation_enabled", False):
             req.system_prompt += (
                 "\n生图能力：用户明确要求画图或生成图片时使用 generate_image，"
-                "只生成一张新图片，不支持参考图编辑。不要把搜索图片当作生成图片。"
+                "只生成一张新图片，不支持参考图编辑。普通找图、发图不授权生图；生图工具只在当前消息明确要求时可用。"
                 "不要读取或要求本机路径，不在普通主动发言中自行生图。"
                 "工具成功后图片已发送，不再重复确认或输出本地文件路径；失败时如实说明。\n"
             )
@@ -315,6 +325,7 @@ class LocalCodex(Star):
         Args:
             event: Incoming private message or group mention.
         """
+        capture_image_request(event)
         self.group_context.observe(event)
         accepted = self._accepts_event(event)
         if event.get_sender_id() != event.get_self_id() and is_allowed(
@@ -515,11 +526,35 @@ class LocalCodex(Star):
         """
         if is_proactive_group(event):
             return "请等待群成员明确要求生图，主动发言不自动生图。"
+        if not requests_image_generation(event):
+            return "本条消息未明确要求生图，请使用网络找图；不能自行生成图片。"
         path = await self.image_generator.generate(event, prompt)
         delivered = await event.send(event.chain_result([Image.fromFileSystem(path)]))
         if delivered is False or getattr(event, "proactive_send_failed", False):
             raise RuntimeError("图片已生成，但未确认发送成功。")
         return None
+
+    @filter.llm_tool(name="search_web_image")
+    async def search_web_image(self, event: AstrMessageEvent, query: str):
+        """Find and send one existing online image with its source to this chat.
+
+        Default for find/search/show/send a picture. Never generates a picture.
+        Successful delivery finishes the turn; do not send another confirmation.
+
+        Args:
+            query(string): Image subject to search, at most 120 characters; no private chat context.
+        """
+        async with self.image_search.prepare(event, query) as (path, source):
+            delivered = await event.send(
+                event.chain_result(
+                    [
+                        Image.fromFileSystem(path),
+                        Plain(f"{source.title}\n来源：{source.page_url}"),
+                    ]
+                )
+            )
+            if delivered is False or getattr(event, "proactive_send_failed", False):
+                raise RuntimeError("已找到图片，但未确认发送成功。")
 
     @filter.llm_tool(name="sing_cover")
     async def sing_cover(self, event: AstrMessageEvent, search_id: str, position: int):
@@ -554,6 +589,7 @@ class LocalCodex(Star):
 
     async def terminate(self):
         """Stop the owned Codex process when this plugin is unloaded."""
+        self.image_search.close()
         await self.profile_learner.close()
         await self.image_generator.stop()
         await self.singing.stop()

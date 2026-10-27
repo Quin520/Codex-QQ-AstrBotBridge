@@ -4,12 +4,14 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
 
+from .image_intent import requests_image_generation
 from .plugin_guards import guard_public_arguments
 
 PUBLIC_PLUGIN_TOOLS = {
     "astrbot_plugin_local_codex": {
         "send_voice",
         "generate_image",
+        "search_web_image",
         "sing_cover",
         "find_cover_music",
     },
@@ -87,10 +89,13 @@ class QQToolPolicy:
             switch = {
                 "send_voice": "voice_enabled",
                 "generate_image": "image_generation_enabled",
+                "search_web_image": "image_search_enabled",
                 "sing_cover": "singing_enabled",
                 "find_cover_music": "singing_enabled",
             }.get(tool.name)
             if switch and not self.config.get(switch, False):
+                return False
+            if tool.name == "generate_image" and not requests_image_generation(event):
                 return False
         return owner_private or tool.name in PUBLIC_PLUGIN_TOOLS.get(plugin, set())
 
