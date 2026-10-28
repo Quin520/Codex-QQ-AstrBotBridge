@@ -1,0 +1,388 @@
+--- a/config.py
++++ b/config.py
+@@ -232,7 +232,7 @@
+     backup_interval_hours: int = 24 # 备份间隔
+     max_backups_per_group: int = 10 # 每群最大备份数
+     auto_apply_approved_persona: bool = False # 审查批准后自动应用到默认人格（危险功能，默认关闭）
+-    require_learning_approval: bool = False  # Gate learned changes, including affection.
++    require_learning_approval: bool = False  # Gate learned content independently of affection.
+ 
+     # 高级设置
+     debug_mode: bool = False # 调试模式
+@@ -261,6 +261,7 @@
+ 
+     # 好感度系统配置
+     enable_affection_system: bool = True # 启用好感度系统
++    require_affection_approval: bool = False  # Independently review affection changes.
+     max_total_affection: int = 250 # bot总好感度满分值
+     max_user_affection: int = 100 # 单个用户最大好感度
+     affection_decay_rate: float = 0.95 # 好感度衰减比例
+@@ -552,6 +553,7 @@
+ 
+             # 好感度系统配置
+             enable_affection_system=affection_settings.get('enable_affection_system', True),
++            require_affection_approval=affection_settings.get('require_affection_approval', False),
+             max_total_affection=affection_settings.get('max_total_affection', 250),
+             max_user_affection=affection_settings.get('max_user_affection', 100),
+             affection_decay_rate=affection_settings.get('affection_decay_rate', 0.95),
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -290,9 +290,9 @@
+         "default": false
+       },
+       "require_learning_approval": {
+-        "description": "学习变化全部先审批",
+-        "type": "bool",
+-        "hint": "表达、人格、黑话和好感度变化仅生成建议，批准后生效。聊天记录与临时上下文继续采集；好感度批准时不会自动扣减其他成员。",
++        "description": "学习内容变化需审批",
++        "type": "bool",
++        "hint": "表达、人格、黑话等学习内容仅生成建议，批准后生效。聊天记录与临时上下文继续采集；好感度由“好感度系统设置”中的独立审批开关控制。",
+         "default": false
+       }
+     }
+@@ -388,6 +388,12 @@
+         "type": "bool",
+         "hint": "是否启用用户好感度和情绪响应系统",
+         "default": true
++      },
++      "require_affection_approval": {
++        "description": "好感度变化需审批",
++        "type": "bool",
++        "hint": "默认关闭，好感度涨跌直接生效并记录明细；开启后仅生成建议，批准后生效。与学习内容审批互不影响。切换不会自动批准或追补已有待审记录。",
++        "default": false
+       },
+       "max_total_affection": {
+         "description": "总好感度上限",
+--- a/core/page_api.py
++++ b/core/page_api.py
+@@ -1054,6 +1054,10 @@
+             "style_reviews": style_reviews,
+             "jargon_pending": pending_jargon,
+             "affection_reviews": {"reviews": affection, "total": len(affection)},
++            "approval_settings": {
++                "require_approval": bool(getattr(container.plugin_config, "require_learning_approval", False)),
++                "require_affection_approval": bool(getattr(container.plugin_config, "require_affection_approval", False)),
++            },
+             "pending_total": (
+                 int(pending.get("total", 0)) + int(pending_jargon.get("total", 0))
+                 + sum(row["status"] == "pending" for row in affection)
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -96,8 +96,21 @@
+ | `save_raw_messages` | `true` | 保存原始消息；关闭后依赖 `raw_messages` 表的学习功能（渐进学习、黑话挖掘等）将没有新数据 |
+ | `auto_backup_interval_days` | `7` | 自动备份间隔 |
+ | `auto_apply_approved_persona` | `false` | 批准后自动应用到默认人格，风险较高 |
++| `require_learning_approval` | `false` | 表达、人格、黑话等学习内容先审批；好感度使用独立开关 |
+ 
+ 日志等级会通过 `utils/logging_utils.py` 同步到 AstrBot logger。
++
++## 好感度审批
++
++配置组: `Affection_System_Settings`
++
++| 字段 | 默认值 | 说明 |
++| --- | --- | --- |
++| `require_affection_approval` | `false` | 默认直接应用好感度涨跌并记录明细；开启后须审批才生效 |
++
++AstrBot 插件配置和独立 WebUI 设置共用此字段。它与“高级设置 → 学习内容变化需审批”互相独立；开启学习内容审批不会开启好感度审批。旧配置未填写此字段时按关闭处理。
++
++切换只影响后续互动，不会自动批准、删除或追补已有的好感度待审建议。旧记录仍可查看；实际数值已变化的建议会按已有规则归入失效记录。两边的审查页面分别显示学习内容审批与好感度审批状态。
+ 
+ ## 数据库配置
+ 
+--- a/web_src/src/test/embedded-reviews.test.ts
++++ b/web_src/src/test/embedded-reviews.test.ts
+@@ -24,6 +24,7 @@
+     { id: 2, user_id: '123', group_id: '456', before: 1, after: 3, status: 'stale', stale_reason: 'Base value changed', message: 'Old evidence' },
+   ];
+   const payload = () => ({
++    approval_settings: { require_approval: true, require_affection_approval: false },
+     persona_pending: { updates: [{ id: 'qq_profile_example', title: 'Member setting', review_source: 'qq_profile', before: 'Old setting', after: 'Proposed setting', evidence: [{ text: 'Explicit preference' }] }], total: 1, source_counts: {} },
+     persona_reviewed: { updates: [] }, style_reviews: { reviews: [], total: 0 },
+     jargon_pending: { jargon_list: [], total: 0 }, affection_reviews: { reviews: rows },
+@@ -40,6 +41,8 @@
+   try {
+     window.eval(script);
+     await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 1 · 失效 1'));
++    expect(document.getElementById('learning-approval-state')).toHaveTextContent('学习内容审批：已开启');
++    expect(document.getElementById('affection-approval-state')).toHaveTextContent('好感度审批：已关闭，新的变化直接生效');
+     expect(document.getElementById('affection-review-history')).toHaveTextContent('Old evidence');
+     expect(document.querySelector('#affection-review-history [data-review-action="approve"]')).toBeNull();
+     expect(post).not.toHaveBeenCalled();
+--- a/web_src/src/components/business/LearningApprovalPanel.test.tsx
++++ b/web_src/src/components/business/LearningApprovalPanel.test.tsx
+@@ -15,7 +15,7 @@
+   mocks.confirm.mockResolvedValue(true);
+   mocks.post.mockResolvedValue({ success: true });
+   mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
+-    ? { require_approval: true, learning_interval_hours: 6, min_messages: 50, groups: [] }
++    ? { require_approval: true, require_affection_approval: false, learning_interval_hours: 6, min_messages: 50, groups: [] }
+     : { reviews: [{ id: 7, user_id: '123', group_id: '456', before: 10, after: 15,
+       change: 5, reason: '友善互动', message: '辛苦啦', status: 'pending', created_at: 1700000000 }] });
+ });
+@@ -23,7 +23,8 @@
+ it('shows evidence and sends an explicit approval for the selected change', async () => {
+   render(() => <LearningApprovalPanel />);
+   await screen.findByText('辛苦啦');
+-  expect(screen.getByText(/已开启：学习变化先审批/)).toBeInTheDocument();
++  expect(screen.getByText(/学习内容审批：已开启/)).toBeInTheDocument();
++  expect(screen.getByText(/好感度审批：已关闭，新的变化直接生效/)).toBeInTheDocument();
+   expect(mocks.post).not.toHaveBeenCalled();
+   fireEvent.click(screen.getByText('通过'));
+   await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/affection_reviews/7/review', { action: 'approve' }));
+@@ -54,3 +55,23 @@
+   await waitFor(() => expect(mocks.confirm).toHaveBeenCalled());
+   expect(mocks.post).not.toHaveBeenCalled();
+ });
++
++it('shows affection approval enabled independently of the learning-content gate', async () => {
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: false, require_affection_approval: true, groups: [] }
++    : { reviews: [] });
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText('好感度审批：已开启，新的变化须批准后生效。');
++  expect(screen.getByText('学习内容审批：未开启强制审批。')).toBeInTheDocument();
++  expect(mocks.post).not.toHaveBeenCalled();
++});
++
++it('does not claim automatic changes before the backend provides the separate setting', async () => {
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: true, groups: [] }
++    : { reviews: [] });
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText(/学习内容审批：已开启/);
++  expect(screen.getByText('好感度审批：状态暂不可用。')).toBeInTheDocument();
++  expect(screen.queryByText(/新的变化直接生效/)).not.toBeInTheDocument();
++});
+--- a/web_src/src/components/business/LearningApprovalPanel.tsx
++++ b/web_src/src/components/business/LearningApprovalPanel.tsx
+@@ -10,7 +10,7 @@
+   change: number; reason: string; message: string; status: string; created_at: number;
+   stale_reason?: string; current_level?: number;
+ };
+-type Status = { require_approval?: boolean; learning_interval_hours?: number; min_messages?: number; groups?: string[] };
++type Status = { require_approval?: boolean; require_affection_approval?: boolean; learning_interval_hours?: number; min_messages?: number; groups?: string[] };
+ 
+ export function LearningApprovalPanel() {
+   const dashboard = useDashboard();
+@@ -55,7 +55,9 @@
+   };
+   return <>
+     <Panel title="学习审批状态" actions={<Button onClick={load}>刷新</Button>}>
+-      <p>{status().require_approval ? '已开启：学习变化先审批，包括好感度涨跌。' : '未开启全部审批，好感度等功能仍可自动变化。'}</p>
++      <p>{status().require_approval === undefined ? '学习内容审批：状态暂不可用。' : status().require_approval ? '学习内容审批：已开启，表达、人格、黑话等内容先审批。' : '学习内容审批：未开启强制审批。'}</p>
++      <p>{status().require_affection_approval === undefined ? '好感度审批：状态暂不可用。' : status().require_affection_approval ? '好感度审批：已开启，新的变化须批准后生效。' : '好感度审批：已关闭，新的变化直接生效。已有待审记录保留，不会自动批准或追补。'}</p>
++      <p>两个开关互相独立；可在设置中的“高级设置”和“好感度系统设置”分别调整。</p>
+       <p>批次学习间隔 {status().learning_interval_hours ?? '--'} 小时，至少 {status().min_messages ?? '--'} 条消息。没有新建议也可能是未到阈值或没有足够证据。</p>
+       <p>好感度为 0 的变化不会生成审批；原数值或上限已变化的建议单独显示，不计入待处理。不会仅因时间久而丢弃建议。</p>
+     </Panel>
+--- a/webui/blueprints/persona_reviews.py
++++ b/webui/blueprints/persona_reviews.py
+@@ -78,6 +78,7 @@
+         groups = list(await session.scalars(select(UserAffection.group_id).distinct()))
+     return jsonify({
+         "require_approval": bool(getattr(config, "require_learning_approval", False)),
++        "require_affection_approval": bool(getattr(config, "require_affection_approval", False)),
+         "learning_interval_hours": config.learning_interval_hours,
+         "min_messages": config.min_messages_for_learning,
+         "groups": groups,
+--- a/tests/unit/test_config.py
++++ b/tests/unit/test_config.py
+@@ -42,6 +42,7 @@
+         assert config.enable_llm_hooks is False
+         assert config.enable_web_interface is True
+         assert config.enable_webui_password is False
++        assert config.require_affection_approval is False
+         assert config.webui_initial_password == ""
+         assert config.web_interface_port == 7833
+         assert config.web_interface_host == "127.0.0.1"
+@@ -61,6 +62,13 @@
+         assert config.expression_learning_min_interval_seconds == 3600
+         assert config.topic_detection_interval_messages == 10
+         assert config.context_injection_position == "end"
++
++    def test_legacy_learning_approval_does_not_enable_affection_review(self):
++        config = PluginConfig.create_from_config({
++            "Advanced_Settings": {"require_learning_approval": True},
++        })
++        assert config.require_learning_approval is True
++        assert config.require_affection_approval is False
+ 
+     def test_default_learning_parameters(self):
+         """Test default learning parameter values."""
+--- a/tests/unit/test_config_service.py
++++ b/tests/unit/test_config_service.py
+@@ -832,6 +832,32 @@
+         assert container.astrbot_config["Advanced_Settings"]["log_level"] == "debug"
+ 
+     @pytest.mark.asyncio
++    async def test_affection_approval_saves_independently_and_survives_reload(self, tmp_path):
++        container = build_container(tmp_path)
++        container.plugin_config.require_learning_approval = True
++        container.astrbot_config["Advanced_Settings"] = {"require_learning_approval": True}
++        container.astrbot_config.config_path = tmp_path / "plugin.json"
++        service = ConfigService(container)
++        schema = await service.get_config_schema()
++        group = next(item for item in schema["groups"] if item["key"] == "Affection_System_Settings")
++        field = next(item for item in group["fields"] if item["key"] == "require_affection_approval")
++        assert field["default"] is False
++        assert field["value"] is False
++        for enabled in (True, False):
++            success, message, updated = await service.update_config({
++                "Affection_System_Settings": {"require_affection_approval": enabled},
++            })
++            assert success, message
++            assert updated["require_affection_approval"] is enabled
++            assert container.plugin_config.require_affection_approval is enabled
++            stored = json.loads(container.astrbot_config.config_path.read_text(encoding="utf-8"))
++            assert stored["Affection_System_Settings"]["require_affection_approval"] is enabled
++            assert stored["Advanced_Settings"]["require_learning_approval"] is True
++            reloaded = PluginConfig.create_from_config(stored)
++            assert reloaded.require_affection_approval is enabled
++            assert reloaded.require_learning_approval is True
++
++    @pytest.mark.asyncio
+     async def test_update_config_accepts_empty_astrbot_config_source(self, tmp_path):
+         container = build_container(tmp_path)
+         container.astrbot_config = SaveableConfig({})
+--- a/tests/unit/test_learning_approval_gate.py
++++ b/tests/unit/test_learning_approval_gate.py
+@@ -32,6 +32,7 @@
+         self.db = SQLAlchemyDatabaseManager(self.config)
+         self.assertTrue(await self.db.start())
+         self.config.require_learning_approval = True
++        self.config.require_affection_approval = True
+         self.affection = AffectionReviewService(self.db, self.config)
+ 
+     async def asyncTearDown(self):
+@@ -101,6 +102,12 @@
+             self.assertEqual((await remote.post(endpoint, json={"action": "approve"})).status_code, 403)
+             self.assertIsNone(await self.db.get_user_affection("group-a", "123"))
+             client = app.test_client(client=("127.0.0.1", 50000))
++            for learning, affection in ((True, False), (False, True), (True, True), (False, False)):
++                self.config.require_learning_approval = learning
++                self.config.require_affection_approval = affection
++                status = await (await client.get("/api/learning_approval_status")).get_json()
++                self.assertEqual(status["require_approval"], learning)
++                self.assertEqual(status["require_affection_approval"], affection)
+             self.assertEqual((await client.post(endpoint, json={"action": "invalid"})).status_code, 400)
+             self.assertEqual((await client.post(endpoint, json={"action": "approve"})).status_code, 200)
+             self.assertEqual((await client.post(endpoint, json={"action": "approve"})).status_code, 409)
+@@ -108,6 +115,60 @@
+             response = await client.post(f"/api/affection_reviews/{rejected_id}/review", json={"action": "reject"})
+             self.assertEqual(response.status_code, 200)
+             self.assertIsNone(await self.db.get_user_affection("group-a", "456"))
++
++    async def test_affection_rises_and_falls_follow_only_the_independent_switch(self):
++        manager = AffectionManager.__new__(AffectionManager)
++        manager.config = self.config
++        manager.db_manager = self.db
++        manager._logger = Mock()
++        manager.get_current_mood = AsyncMock(return_value=None)
++        manager._handle_mood_response = AsyncMock()
++        manager._redistribute_affection = AsyncMock()
++        for learning in (True, False):
++            for affection in (False, True):
++                self.config.require_learning_approval = learning
++                self.config.require_affection_approval = affection
++                for delta in (5, -3):
++                    with self.subTest(learning=learning, affection=affection, delta=delta):
++                        user = f"member-{learning}-{affection}-{delta}"
++                        await self.db.update_user_affection("group-a", user, 20)
++                        manager._calculate_affection_change = Mock(return_value={
++                            "can_change": True, "change": delta, "reason": "test interaction",
++                        })
++                        result = await manager.update_affection(
++                            "group-a", user, InteractionType.CHAT, "new interaction",
++                        )
++                        self.assertTrue(result["success"])
++                        self.assertEqual(bool(result.get("pending_review")), affection)
++                        level = (await self.db.get_user_affection("group-a", user))["affection_level"]
++                        self.assertEqual(level, 20 if affection else 20 + delta)
++                        reviews = [row for row in await self.affection.list_reviews() if row["user_id"] == user]
++                        self.assertEqual(len(reviews), int(affection))
++                        history = [row for row in await self.db.get_affection_history("group-a", user)
++                                   if row["message"] == "new interaction"]
++                        self.assertEqual(len(history), int(not affection))
++                        if history:
++                            self.assertEqual((history[0]["previous_level"], history[0]["new_level"]), (20, 20 + delta))
++
++    async def test_disabling_affection_review_preserves_old_queue_without_replaying_it(self):
++        review_id = await self.proposal(after=5)
++        self.config.require_affection_approval = False
++        manager = AffectionManager.__new__(AffectionManager)
++        manager.config = self.config
++        manager.db_manager = self.db
++        manager._logger = Mock()
++        manager.get_current_mood = AsyncMock(return_value=None)
++        manager._calculate_affection_change = Mock(return_value={
++            "can_change": True, "change": 2, "reason": "new interaction",
++        })
++        manager._handle_mood_response = AsyncMock()
++        result = await manager.update_affection("group-a", "123", InteractionType.CHAT, "new interaction")
++        self.assertEqual(result["new_level"], 2)
++        self.assertEqual(await self.count(AffectionReview), 1)
++        rows = await self.affection.list_reviews("all")
++        self.assertEqual(rows[0]["id"], review_id)
++        self.assertEqual(rows[0]["stored_status"], "pending")
++        self.assertEqual(rows[0]["status"], "stale")
+ 
+     async def test_mood_personality_changes_are_queued_before_persistence(self):
+         updater = TemporaryPersonaUpdater.__new__(TemporaryPersonaUpdater)
+@@ -185,6 +246,9 @@
+              patch.object(auth, "get_container", return_value=container):
+             client = app.test_client(client=("127.0.0.1", 50000))
+             before = await api._load_reviews(limit=0)
++            self.assertEqual(before["approval_settings"], {
++                "require_approval": True, "require_affection_approval": True,
++            })
+             self.assertEqual(persona.get_pending_persona_updates.await_args.kwargs["limit"], 0)
+             self.assertEqual(learning.get_style_learning_reviews.await_args.kwargs["limit"], 0)
+             self.assertEqual(persona.get_reviewed_persona_updates.await_args.args[0], 50)
+--- a/services/state/affection_manager.py
++++ b/services/state/affection_manager.py
+@@ -674,7 +674,7 @@
+                 interaction_type, current_level, current_mood
+             )
+ 
+-            if getattr(self.config, "require_learning_approval", False):
++            if getattr(self.config, "require_affection_approval", False):
+                 from ..learning.affection_review import AffectionReviewService
+ 
+                 proposed = max(0, min(
+--- a/pages/dashboard/app.js
++++ b/pages/dashboard/app.js
+@@ -896,6 +896,15 @@
+ 
+   function renderReviews(data) {
+     if (state.profileDirty) return;
++    const approval = data.approval_settings || {};
++    setText("learning-approval-state", approval.require_approval === undefined
++      ? "学习内容审批：状态暂不可用。"
++      : approval.require_approval ? "学习内容审批：已开启。" : "学习内容审批：未开启强制审批。");
++    setText("affection-approval-state", approval.require_affection_approval === undefined
++      ? "好感度审批：状态暂不可用。"
++      : approval.require_affection_approval
++      ? "好感度审批：已开启，新的变化须批准后生效。"
++      : "好感度审批：已关闭，新的变化直接生效。已有待审记录保留，不会自动批准或追补。");
+     const personaPending = ((data.persona_pending || {}).updates || [])
+       .filter((item) => item && item.review_source !== "style_learning");
+     const personaReviewed = ((data.persona_reviewed || {}).updates || []);
+--- a/pages/dashboard/index.html
++++ b/pages/dashboard/index.html
+@@ -162,6 +162,7 @@
+             <div>
+               <h3 data-i18n="reviews.title">审查队列</h3>
+               <p data-i18n="reviews.desc">人格更新、表达学习和黑话候选集中处理。</p>
++              <p id="learning-approval-state">审批设置加载中</p>
+             </div>
+             <button class="ghost-button" type="button" data-refresh-page="reviews" data-i18n="actions.refresh">刷新</button>
+           </div>
+@@ -217,6 +218,7 @@
+           </div>
+           <div class="panel">
+             <div class="panel-heading"><h3>好感度审批</h3><span class="mini-badge" id="affection-review-count">加载中</span></div>
++            <p id="affection-approval-state">好感度审批设置加载中</p>
+             <p>与独立 WebUI 共用审批记录；原数值已变化的建议单独显示，不计入待处理。时间久不代表失效。</p>
+             <div class="review-list" id="affection-review-list"></div>
+             <details><summary>失效建议与处理历史</summary><div class="review-list" id="affection-review-history"></div></details>

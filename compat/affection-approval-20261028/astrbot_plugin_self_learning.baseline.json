@@ -1,0 +1,77 @@
+{
+  "upstream_commit": "9cbe0941da501779932e726f35bb8c17be9de6c7",
+  "requires": "../review-sync-20261027/astrbot_plugin_self_learning.patch",
+  "hash_format": "UTF-8 bytes with LF line endings",
+  "files": [
+    {
+      "path": "config.py",
+      "before_lf_sha256": "5ee4d5dbafc8621d96b43de384eb13ab00895c7b7c7bcffdef4052032654ecb6",
+      "after_lf_sha256": "0780a2778efe892b84b26f03830f8bb41682b700c32859f0b11ba15250d7c0a8"
+    },
+    {
+      "path": "_conf_schema.json",
+      "before_lf_sha256": "f3f804c59e4da3a9db1fdcacc8b236f8efa359988234babaade27b29d62041b1",
+      "after_lf_sha256": "6417d7a8876b840b8cbb9db0e4a93423bcacaf40f6db1da4cf9e004e424417e4"
+    },
+    {
+      "path": "core/page_api.py",
+      "before_lf_sha256": "c2127d2c60edfb9e154fbd4ae5313ec38294fc335166a1670231850207d4d832",
+      "after_lf_sha256": "f667ada519f8bc452e7b33dc467ca32fb8d4806731bf9333f4e755627838af97"
+    },
+    {
+      "path": "docs/configuration.md",
+      "before_lf_sha256": "b433bc01d4cfeceb5c8bc16d550395ad8ad2bcc816ea3c1b7c25370e7f49a1d7",
+      "after_lf_sha256": "e144acc8c93b0af0a4a568769c990a849a5d312ebfc3b03a2030a95e66940a2b"
+    },
+    {
+      "path": "web_src/src/test/embedded-reviews.test.ts",
+      "before_lf_sha256": "48208075531c67e3a8159beb6e8e98f1e5e24df244e14eb86ea2258a66beab3c",
+      "after_lf_sha256": "5ef121b4b39b2e3545b6bd3778894a790dcc990a846c78d1a82326408d0bb6ca"
+    },
+    {
+      "path": "web_src/src/components/business/LearningApprovalPanel.test.tsx",
+      "before_lf_sha256": "b2f244be2cf5184090be7b932710cea33bd2c722c5d21b24e449eabb0ae79163",
+      "after_lf_sha256": "6a09560bafcc4d644d1f9819d936309babf370e06f1e70cf2c0bcb3f3e0be085"
+    },
+    {
+      "path": "web_src/src/components/business/LearningApprovalPanel.tsx",
+      "before_lf_sha256": "e7d3321a1cce2e9417aa6319fed2adea95c4fee3acb717ca6a7e6c0648cb6617",
+      "after_lf_sha256": "b303d9fb6597f0b939690d7e239df154675a2d4b899cff6da2e3aa98ed258e86"
+    },
+    {
+      "path": "webui/blueprints/persona_reviews.py",
+      "before_lf_sha256": "543de6f322b2a0d68478c9d3e3b21a43a239fbb934d2def3291ea0cabc4b7860",
+      "after_lf_sha256": "db6ea1ed1e65ce1d75c6a91655b924d08ef68e02d5034a7afc438e6919956974"
+    },
+    {
+      "path": "tests/unit/test_config.py",
+      "before_lf_sha256": "56fb064ddbf9090e51b294008a361edc430fba617fe7317e0e04d543be4eb179",
+      "after_lf_sha256": "af17eac6995f06783406db0b3997c0850bb624afc6b9c8efa1fcf63f011d55c4"
+    },
+    {
+      "path": "tests/unit/test_config_service.py",
+      "before_lf_sha256": "bc1228f11d146b4b7ae55d9c60e21b14d464f970024e6f329398b6d84e24d7af",
+      "after_lf_sha256": "26e43eb408d6c10f476d8f01e92b5ffacb49f0e785e7d549272fe3333013dfee"
+    },
+    {
+      "path": "tests/unit/test_learning_approval_gate.py",
+      "before_lf_sha256": "890c888a8f14619eb7bcbd610fe0295e5842b84f771cb0cffe68f6de1fb1928f",
+      "after_lf_sha256": "4c4e64254e6fad135b0122f5414cb1a08adfef67326ea3a55bf50b04a3bd7c35"
+    },
+    {
+      "path": "services/state/affection_manager.py",
+      "before_lf_sha256": "fcddaf3666aba65a400e53811f90e00ff3e090796813972a160e42a84393252d",
+      "after_lf_sha256": "027767ad4c3c5ecbd7f81c617633de111fdf48220343f57da2be8f98bd416133"
+    },
+    {
+      "path": "pages/dashboard/app.js",
+      "before_lf_sha256": "9ff8d7cc0c287599f04cda65d3ea0dd4757c2e0879453f5da7fa666b33ec879a",
+      "after_lf_sha256": "2f84a5500953f7195521a892c09945402a7f9c79670e4763afe33c8a447fd678"
+    },
+    {
+      "path": "pages/dashboard/index.html",
+      "before_lf_sha256": "468f0859099f15ffd1ebda6ae1d12f71429805718730ea3c008aec37b144d407",
+      "after_lf_sha256": "c7e990ec3905407cdfff21a0e983073899ad5819ae99b0f1279529f2120be0cf"
+    }
+  ]
+}
