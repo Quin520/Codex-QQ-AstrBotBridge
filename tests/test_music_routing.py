@@ -26,6 +26,9 @@ def handler(module=PARSER, name="on_message", callback=None):
         handler_name=name,
         handler_full_name=module + "_" + name,
         handler=callback or AsyncMock(),
+        event_filters=[],
+        event_type=SimpleNamespace(name="OnMessageEvent"),
+        extras_configs={},
     )
 
 
@@ -232,7 +235,7 @@ class MusicRoutingTests(unittest.IsolatedAsyncioTestCase):
                     star_map,
                     {
                         item.handler_module_path: SimpleNamespace(
-                            name=item.handler_name
+                            name=item.handler_name, display_name=item.handler_name
                         )
                         for item in handlers
                     },

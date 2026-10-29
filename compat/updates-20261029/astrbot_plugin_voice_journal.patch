@@ -1,0 +1,87 @@
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -8,6 +8,7 @@
+   "engine_device": {"description": "转写设备", "type": "string", "default": "cpu", "options": ["cpu", "cuda"], "hint": "默认 CPU，最多使用下方配置的线程数。CUDA 需独立环境已安装兼容版本。"},
+   "cpu_threads": {"description": "语音处理 CPU 线程数", "type": "int", "default": 2},
+   "web_port": {"description": "本地管理面板端口", "type": "int", "default": 7844, "hint": "仅监听 127.0.0.1，面板需要管理口令。"},
++  "web_trusted_origins": {"description": "管理面板允许的远程网址", "type": "list", "default": [], "hint": "通过 Tailscale 转发面板时，填写完整网址，例如 http://100.108.224.26:7844。仍需管理口令，不支持通配符。"},
+   "remote_enabled": {"description": "启用 B 端录音接收", "type": "bool", "default": false, "hint": "接收 B 的群聊播放与麦克风音轨。只开放上传接口；配置变化需重启。跨网络使用 Tailscale 私有组网。"},
+   "remote_bind": {"description": "B 端接收监听地址", "type": "string", "default": "0.0.0.0", "hint": "推荐填写 0.0.0.0，或仅填写 A 的 Tailscale IP。也兼容 https://本机IP:端口，并自动去除首尾空格；端口须与下方一致。B 导入的连接网址在语音手记面板中填写。仍限制来源并要求独立上传口令。"},
+   "remote_port": {"description": "B 端加密上传端口", "type": "int", "default": 7845, "hint": "A、B 通过此端口传音频；审核面板仍仅监听本机 7844。"},
+--- a/tests/test_service_web.py
++++ b/tests/test_service_web.py
+@@ -142,3 +142,34 @@
+         await service.close()
+ 
+     asyncio.run(run())
++
++
++def test_remote_panel_requires_trusted_origin_and_bearer_token(tmp_path):
++    async def run():
++        service = JournalService(
++            {"group_id": "100001", "auto_summary": False},
++            Store(tmp_path),
++            FakeEngine(),
++            summary,
++            members,
++        )
++        panel = WebPanel(service, tmp_path, 7844)
++        origin = "http://100.108.224.26:7844"
++        headers = {"Host": "100.108.224.26:7844", "Origin": origin}
++        async with TestClient(TestServer(panel.app)) as client:
++            assert (await client.get("/api/status", headers=headers)).status == 403
++            service.config["web_trusted_origins"] = [origin]
++            assert (await client.get("/api/status", headers=headers)).status == 401
++            headers["Authorization"] = "Bearer " + panel.token
++            assert (await client.get("/api/status", headers=headers)).status == 200
++            for override in (
++                {"Origin": "https://untrusted.invalid"},
++                {"Host": "rebind.invalid:7844"},
++                {"Host": "100.108.224.26:9999"},
++                {"Authorization": "Bearer wrong-token"},
++            ):
++                response = await client.get("/api/status", headers={**headers, **override})
++                assert response.status in {401, 403}
++        await service.close()
++
++    asyncio.run(run())
+--- a/web.py
++++ b/web.py
+@@ -1,9 +1,10 @@
+-"""Loopback-only review UI with bearer authentication and explicit capture consent."""
++"""Review UI with trusted origins, bearer authentication, and capture consent."""
+ 
+ import json
+ import logging
+ import secrets
+ from pathlib import Path
++from urllib.parse import urlsplit
+ 
+ from aiohttp import web
+ 
+@@ -52,13 +53,23 @@
+ 
+     @web.middleware
+     async def guard(self, request, handler):
+-        host = request.host.split(":")[0]
+-        if host not in {"localhost", "127.0.0.1"}:
++        trusted_origins = {
++            value.rstrip("/")
++            for value in (self.service.config.get("web_trusted_origins") or [])
++            if isinstance(value, str)
++        }
++        try:
++            host = urlsplit("//" + request.host).hostname
++        except ValueError:
++            raise web.HTTPForbidden() from None
++        request_origin = f"{request.scheme}://{request.host}"
++        if host not in {"localhost", "127.0.0.1"} and request_origin not in trusted_origins:
+             raise web.HTTPForbidden()
+         origin = request.headers.get("Origin")
+         if origin and origin not in {
+             f"http://127.0.0.1:{self.port}",
+             f"http://localhost:{self.port}",
++            *trusted_origins,
+         }:
+             raise web.HTTPForbidden()
+         if request.path.startswith("/api/"):

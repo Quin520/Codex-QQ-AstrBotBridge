@@ -111,6 +111,9 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
             handler_module_path=module,
             handler_name="chat",
             handler=self.plugin.chat,
+            event_filters=[],
+            event_type=SimpleNamespace(name="OnMessageEvent"),
+            extras_configs={},
         )
         for sender, group, mention, expected in [
             ("123", "", None, 1),
@@ -125,7 +128,7 @@ class IntegrationTests(unittest.IsolatedAsyncioTestCase):
                 event.send = AsyncMock()
                 event.set_extra("activated_handlers", [handler])
                 with (
-                    patch.dict(star_map, {module: SimpleNamespace(name="bridge")}),
+                    patch.dict(star_map, {module: SimpleNamespace(name="bridge", display_name="Bridge")}),
                     patch(
                         "astrbot.core.pipeline.respond.stage.call_event_hook",
                         new=AsyncMock(return_value=False),

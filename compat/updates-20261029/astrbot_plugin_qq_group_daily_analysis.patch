@@ -1,0 +1,16 @@
+--- a/dashboard/src/entities/trace/model/sla.ts
++++ b/dashboard/src/entities/trace/model/sla.ts
+@@ -1,4 +1,4 @@
+-﻿/**
++/**
+  * 依据各阶段特性（本地计算 vs 外部协议 vs 大模型 vs 绘图）制定 SLA 健康基线与超时预算
+  */
+ export function getStageSlaThreshold(stageName: string): {
+--- a/dashboard/src/vite-env.d.ts
++++ b/dashboard/src/vite-env.d.ts
+@@ -1,4 +1,4 @@
+-﻿/// <reference types="vite/client" />
++/// <reference types="vite/client" />
+ 
+ declare module "*.png" {
+   const value: string;

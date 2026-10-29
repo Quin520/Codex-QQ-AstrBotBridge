@@ -11,20 +11,52 @@
     "hint": "留空时只响应你的私聊。填入一个目标群号后，该群任何人 @机器人都能聊天；每人独立保存对话，可另外启用本群公共上下文。",
     "default": ""
   },
+  "model_backend": {
+    "type": "string",
+    "description": "模型接入方式",
+    "options": ["api", "cli"],
+    "hint": "API 模式复用 AstrBot 中的模型与凭据，保留成员设定、群上下文、审批和媒体工具。CLI 模式兼容原有订阅接入。",
+    "default": "cli"
+  },
+  "api_provider_id": {
+    "type": "string",
+    "description": "API 聊天模型",
+    "_special": "select_provider",
+    "condition": {"model_backend": "api"},
+    "hint": "选择 AstrBot 中已启用的 OpenAI Responses 或 Compatible 模型。无需在本插件重复填写 API Key。",
+    "default": ""
+  },
+  "image_api_model": {
+    "type": "string",
+    "description": "API 生图模型",
+    "condition": {"model_backend": "api", "image_generation_enabled": true},
+    "hint": "复用所选 API 提供商的凭据调用 Images API；默认每次生成一张 1024×1024 图片。",
+    "default": "gpt-image-2.5-flare"
+  },
+  "image_api_quality": {
+    "type": "string",
+    "description": "API 生图质量",
+    "condition": {"model_backend": "api", "image_generation_enabled": true},
+    "options": ["low", "medium", "high"],
+    "default": "medium"
+  },
   "codex_exe": {
     "type": "string",
+    "condition": {"model_backend": "cli"},
     "description": "本机 Codex 程序路径",
     "hint": "填写这台 Windows 电脑上原生 codex.exe 的绝对路径，不能填写 codex.cmd 或 codex.ps1。查找方法见 README。",
     "default": ""
   },
   "model": {
     "type": "string",
+    "condition": {"model_backend": "cli"},
     "description": "Codex 模型（可留空）",
     "hint": "留空使用 Codex CLI 内置默认模型；不会读取你个人 config.toml 中的模型设置。手动填写时使用当前账号可用的模型 ID。",
     "default": ""
   },
   "integrate_plugins": {
     "type": "bool",
+    "condition": {"model_backend": "cli"},
     "description": "接入 AstrBot 插件和人格",
     "hint": "开启后注册并选用本机 Codex 提供商，启用群内按发送者隔离，聊天经过 AstrBot 插件、人格和工具流程。升级后使用新的 AstrBot 会话；完整说明见 README。",
     "default": false
@@ -32,7 +64,7 @@
   "group_context_enabled": {
     "type": "bool",
     "description": "共享目标群的近期公开聊天",
-    "hint": "按 QQ 号保留说话者身份，参考目标群其他成员的近期发言和机器人回复；包括没有 @机器人的文字。私聊和其他群不会混入。记录只保存在本机插件数据目录，随聊天请求发给 Codex。/new 只重开个人对话。",
+    "hint": "按 QQ 号保留说话者身份，参考目标群其他成员的近期发言和机器人回复；包括没有 @机器人的文字。私聊和其他群不会混入。记录保存在本机插件数据目录，随聊天请求发给所选模型。/new 只重开个人对话。",
     "default": false
   },
   "group_context_max_messages": {
@@ -56,7 +88,7 @@
   "video_summary_enabled": {
     "type": "bool",
     "description": "分析视频画面并记入本群上下文",
-    "hint": "目标群实际 @机器人并发送或引用视频时，抽取最多 6 帧生成视觉摘要。主人私聊也可用；不识别音频，不自动分析未 @的视频。需要 ffmpeg/ffprobe。会增加一次 Codex 识图调用。",
+    "hint": "目标群实际 @机器人并发送或引用视频时，抽取最多 6 帧生成视觉摘要。不识别音频，不自动分析未 @的视频。需要 ffmpeg/ffprobe，会增加一次所选模型的识图调用。",
     "default": false
   },
   "video_ffmpeg_path": {
@@ -109,7 +141,7 @@
   },
   "voice_cooldown_seconds": {
     "type": "int",
-    "description": "同一群或私聊的语音间隔（秒）",
+    "description": "同一会话的语音间隔（秒）",
     "hint": "默认 30，范围 5–600；同一群的成员共享冷却，一次回复最多一条语音。",
     "default": 30
   },
@@ -206,26 +238,27 @@
   },
   "image_generation_enabled": {
     "type": "bool",
-    "description": "允许 Codex CLI 按需生图",
-    "hint": "使用当前 Codex 的 ChatGPT 登录和原生生图工具；不需 API Key。仅生成新图片，不读取参考图；专用受限进程完成后发送到当前 QQ 会话。需要支持细粒度文件权限和原生生图的 CLI，并把 AstrBot 工具调用超时设为至少 300 秒。",
+    "description": "允许按需生成新图片",
+    "hint": "API 模式调用所选提供商的 Images API；CLI 模式使用订阅的原生生图。只在明确创作请求中生成一张新图并发送到当前会话。把 AstrBot 工具调用超时设为至少 300 秒。",
     "default": false
   },
   "image_generation_cooldown_seconds": {
     "type": "int",
-    "description": "同一群或私聊的生图间隔（秒）",
-    "hint": "默认 60，范围 10–3600。一次最多一张，全实例同时只生成一张；生图会使用 Codex 账号额度。",
+    "description": "同一会话的生图间隔（秒）",
+    "hint": "默认 60，范围 10–3600。一次最多一张，全实例同时只生成一张；按当前接入方式使用 API 或订阅额度。",
     "default": 60
   },
   "fast_mode": {
     "type": "bool",
+    "condition": {"model_backend": "cli"},
     "description": "默认启用 Codex Fast 模式",
     "hint": "开启后请求 Fast 服务速度，不降低思考深度。会更快消耗订阅额度，实际可用性取决于当前模型和账号。关闭后请求 Standard 速度。",
     "default": true
   },
   "web_search": {
     "type": "bool",
-    "description": "允许 Codex 联网搜索",
-    "hint": "使用已登录 Codex 的在线搜索，无须另填搜索 API Key。允许搜索和读取公开网页，不开启本机文件、命令或电脑权限。搜索增加耗时并使用账号额度；保存后重启 AstrBot。",
+    "description": "允许联网搜索公开信息",
+    "hint": "API 模式使用所选提供商的 Responses Web Search；CLI 模式使用订阅内置搜索。只搜索公开主题，不开放本机文件或电脑权限。会使用相应账号的搜索额度。",
     "default": false
   },
   "enforce_owner_permissions": {
@@ -236,6 +269,7 @@
   },
   "reasoning_effort": {
     "type": "string",
+    "condition": {"model_backend": "cli"},
     "description": "Codex 推理等级",
     "hint": "日常聊天建议 low；复杂分析可选 medium 或 high。与 Fast 服务速度独立，具体等级需模型支持。",
     "options": ["low", "medium", "high", "xhigh"],
@@ -243,6 +277,7 @@
   },
   "max_parallel_requests": {
     "type": "int",
+    "condition": {"model_backend": "cli"},
     "description": "插件接入模式的并发请求数",
     "hint": "默认 2，让聊天与自学习等后台调用可以同时进行；范围 1–4。设为 1 时所有调用排队。",
     "default": 2
@@ -393,6 +428,7 @@
   },
   "timeout_seconds": {
     "type": "int",
+    "condition": {"model_backend": "cli"},
     "description": "单次请求超时秒数",
     "hint": "范围 30 到 600 秒。",
     "default": 180

@@ -13,6 +13,8 @@ from pathlib import Path
 from PIL import Image
 
 from .access import is_allowed
+from .api_services import generate_api_image
+from .backend import uses_api
 from .runner import CodexRunner
 
 MAX_IMAGE_BYTES = 32 * 1024 * 1024
@@ -74,21 +76,7 @@ def collect_generated_image(
         if len(data) > MAX_IMAGE_BYTES:
             raise RuntimeError("The generated image exceeds the 32 MB size limit.")
         _regular_path(source)
-        with warnings.catch_warnings():
-            warnings.simplefilter("error", Image.DecompressionBombWarning)
-            with Image.open(io.BytesIO(data)) as decoded:
-                if decoded.format not in {"PNG", "JPEG"}:
-                    raise RuntimeError("Codex did not create a PNG or JPEG image.")
-                if not 0 < decoded.width * decoded.height <= MAX_IMAGE_PIXELS:
-                    raise RuntimeError("The generated image dimensions are too large.")
-                suffix = ".png" if decoded.format == "PNG" else ".jpg"
-                decoded.verify()
-        output_dir.mkdir(parents=True, exist_ok=True)
-        _regular_path(output_dir, directory=True)
-        destination = output_dir / f"{uuid.uuid4().hex}{suffix}"
-        with destination.open("xb") as stream:
-            stream.write(data)
-        return destination
+        return write_verified_image(data, output_dir)
     except (
         OSError,
         ValueError,
@@ -100,11 +88,33 @@ def collect_generated_image(
         ) from error
 
 
+def write_verified_image(data: bytes, output_dir: Path) -> Path:
+    """Validate actual image bytes and create one outgoing file under a trusted root."""
+    if not 0 < len(data) <= MAX_IMAGE_BYTES:
+        raise RuntimeError("The generated image exceeds the size limit or is empty.")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", Image.DecompressionBombWarning)
+        with Image.open(io.BytesIO(data)) as decoded:
+            if decoded.format not in {"PNG", "JPEG"}:
+                raise RuntimeError("The service did not create a PNG or JPEG image.")
+            if not 0 < decoded.width * decoded.height <= MAX_IMAGE_PIXELS:
+                raise RuntimeError("The generated image dimensions are too large.")
+            suffix = ".png" if decoded.format == "PNG" else ".jpg"
+            decoded.verify()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _regular_path(output_dir, directory=True)
+    destination = output_dir / f"{uuid.uuid4().hex}{suffix}"
+    with destination.open("xb") as stream:
+        stream.write(data)
+    return destination
+
+
 class ImageGenerator:
     """Authorize and rate-limit image generation without exposing file paths."""
 
-    def __init__(self, config: dict, data_dir: Path):
+    def __init__(self, config: dict, data_dir: Path, *, context=None):
         self.config = config
+        self.context = context
         self.data_dir = data_dir / "image_generation"
         codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
         if not codex_home.is_absolute():
@@ -112,7 +122,7 @@ class ImageGenerator:
         self.artifact_root = codex_home / "generated_images"
         self.lock = asyncio.Lock()
         self.last_started = {}
-        self.runner = CodexRunner(
+        self.runner = None if uses_api(config) else CodexRunner(
             Path(str(config.get("codex_exe", ""))).expanduser(),
             self.data_dir,
             240,
@@ -126,7 +136,8 @@ class ImageGenerator:
 
     async def stop(self) -> None:
         """Stop the owned worker when the bridge is unloaded."""
-        await self.runner.stop()
+        if self.runner is not None:
+            await self.runner.stop()
 
     async def generate(self, event, prompt: str) -> Path:
         """Generate one new image for the real authorized QQ event.
@@ -175,6 +186,11 @@ class ImageGenerator:
         async with self.lock:
             self.last_started[key] = now
             self.data_dir.mkdir(parents=True, exist_ok=True)
+            if uses_api(self.config):
+                data = await generate_api_image(self.context, self.config, prompt.strip())
+                return await asyncio.to_thread(
+                    write_verified_image, data, self.data_dir / "outgoing"
+                )
             description = json.dumps(
                 {"image_description": prompt.strip()}, ensure_ascii=False
             )

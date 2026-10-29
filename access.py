@@ -4,6 +4,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.core.agent.tool import FunctionTool
 from astrbot.core.astr_agent_tool_exec import call_local_llm_tool
 
+from .backend import uses_api
 from .image_intent import requests_image_generation
 from .plugin_guards import guard_public_arguments
 
@@ -12,6 +13,7 @@ PUBLIC_PLUGIN_TOOLS = {
         "send_voice",
         "generate_image",
         "search_web_image",
+        "search_public_web",
         "send_douyin_video",
         "sing_cover",
         "find_cover_music",
@@ -87,10 +89,13 @@ class QQToolPolicy:
         if not plugin:
             return False
         if plugin == "astrbot_plugin_local_codex":
+            if tool.name == "search_public_web" and not uses_api(self.config):
+                return False
             switch = {
                 "send_voice": "voice_enabled",
                 "generate_image": "image_generation_enabled",
                 "search_web_image": "image_search_enabled",
+                "search_public_web": "web_search",
                 "send_douyin_video": "douyin_video_enabled",
                 "sing_cover": "singing_enabled",
                 "find_cover_music": "singing_enabled",

@@ -6,6 +6,7 @@ from pathlib import Path
 from astrbot.api.provider import ProviderType
 from astrbot.api.star import Context
 
+from .backend import provider_id, uses_api
 from .provider import PROVIDER_ID, PROVIDER_TYPE
 
 
@@ -17,6 +18,9 @@ async def configure_provider(context: Context, config: dict, data_dir: Path) -> 
         config: Bridge configuration, including the local CLI path.
         data_dir: Private directory for the previous setting values.
     """
+    if uses_api(config):
+        await _configure_api_provider(context, config, data_dir)
+        return
     if not config.get("integrate_plugins", False):
         return
     global_config = context.get_config()
@@ -82,6 +86,21 @@ async def configure_provider(context: Context, config: dict, data_dir: Path) -> 
     runner["config"]["model"]["provider_id"] = PROVIDER_ID
     global_config["platform_settings"]["unique_session"] = True
     global_config["provider_settings"]["show_tool_use_status"] = False
+    _apply_owner_permissions(global_config, config, data_dir)
+    await global_config.save_config_async()
+    manager = context.provider_manager
+    manager.providers_config = providers
+    manager.provider_sources_config = sources
+    manager.default_chat_provider_id = PROVIDER_ID
+    # Startup loads providers after plugins. A completed/active MCP-init task
+    # distinguishes a hot reload, where the provider manager is already running.
+    if manager._mcp_init_task is not None:
+        await manager.reload(existing)
+        await manager.set_provider(PROVIDER_ID, ProviderType.CHAT_COMPLETION)
+
+
+def _apply_owner_permissions(global_config, config: dict, data_dir: Path) -> None:
+    """Preserve the same owner-only computer policy for either model backend."""
     if config.get("enforce_owner_permissions", False):
         owner = str(config.get("owner_qq", "")).strip()
         if not owner.isdecimal():
@@ -112,13 +131,27 @@ async def configure_provider(context: Context, config: dict, data_dir: Path) -> 
             "allow_network": False,
             "filesystem_scope": "none",
         }
+
+
+async def _configure_api_provider(context: Context, config: dict, data_dir: Path) -> None:
+    """Select an existing API provider while leaving its credentials and model intact."""
+    selected = provider_id(config)
+    global_config = context.get_config()
+    providers = global_config["provider"]
+    existing = next((item for item in providers if item["id"] == selected), None)
+    if not existing or not existing.get("enable", True):
+        raise ValueError("The selected API provider is missing or disabled.")
+    sources = global_config.get("provider_sources", [])
+    source = next((item for item in sources if item["id"] == existing.get("provider_source_id")), {})
+    effective = {**source, **existing}
+    if effective.get("type") not in {"openai_responses", "openai_chat_completion"}:
+        raise ValueError("API mode requires an OpenAI Responses or compatible chat provider.")
+    runner = global_config["agent_runner"]
+    if runner["runner_type"] != "local":
+        raise ValueError("QQ tools and context require AstrBot's local Agent Runner.")
+    runner["config"]["model"]["provider_id"] = selected
+    global_config["platform_settings"]["unique_session"] = True
+    global_config["provider_settings"]["show_tool_use_status"] = False
+    _apply_owner_permissions(global_config, config, data_dir)
     await global_config.save_config_async()
-    manager = context.provider_manager
-    manager.providers_config = providers
-    manager.provider_sources_config = sources
-    manager.default_chat_provider_id = PROVIDER_ID
-    # Startup loads providers after plugins. A completed/active MCP-init task
-    # distinguishes a hot reload, where the provider manager is already running.
-    if manager._mcp_init_task is not None:
-        await manager.reload(existing)
-        await manager.set_provider(PROVIDER_ID, ProviderType.CHAT_COMPLETION)
+    context.provider_manager.default_chat_provider_id = selected

@@ -1,4 +1,4 @@
-"""Bridge private chat and allowed QQ group mentions to the local Codex CLI."""
+"""Bridge QQ identity, context, and tools to a configured API or Codex backend."""
 
 import asyncio
 import hashlib
@@ -17,6 +17,8 @@ from astrbot.core.star.star import StarMetadata
 from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 
 from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
+from .api_services import search_public_web
+from .backend import provider_id, uses_api, uses_pipeline
 from .cover_sources import CoverSources
 from .douyin_video import DouyinVideo
 from .group_context import GroupContext, is_proactive_group
@@ -60,7 +62,7 @@ class LocalCodex(Star):
             self.config, self.data_dir / "group_context.json"
         )
         self.video_context = VideoContext(self.config, self.data_dir)
-        self.image_generator = ImageGenerator(self.config, self.data_dir)
+        self.image_generator = ImageGenerator(self.config, self.data_dir, context=context)
         self.image_search = ImageSearch(self.config, self.data_dir)
         self.media_cache = MediaCacheCleaner(
             config,
@@ -87,7 +89,7 @@ class LocalCodex(Star):
             config, self.data_dir, self._refresh_profiles
         )
         self.profile_learner = ProfileLearner(self, self.profile_reviews)
-        self.runner = CodexRunner(
+        self.runner = None if uses_api(config) else CodexRunner(
             Path(str(config.get("codex_exe", ""))).expanduser(),
             self.data_dir,
             max(30, min(600, int(config.get("timeout_seconds", 180)))),
@@ -144,9 +146,9 @@ class LocalCodex(Star):
     @filter.on_astrbot_loaded()
     async def select_provider(self) -> None:
         """Select the configured provider after AstrBot finishes startup."""
-        if self.config.get("integrate_plugins", False):
+        if uses_pipeline(self.config):
             await self.context.provider_manager.set_provider(
-                PROVIDER_ID, ProviderType.CHAT_COMPLETION
+                provider_id(self.config), ProviderType.CHAT_COMPLETION
             )
 
     def _profile_instructions(self, event: AstrMessageEvent) -> str:
@@ -174,7 +176,7 @@ class LocalCodex(Star):
             req: AstrBot request containing persona, context, and plugin tools.
         """
         if (
-            not self.config.get("integrate_plugins", False)
+            not uses_pipeline(self.config)
             or event.get_platform_name() != "aiocqhttp"
         ):
             return
@@ -218,6 +220,11 @@ class LocalCodex(Star):
         req.system_prompt += roleplay_instructions(
             self.config, proactive=proactive_group
         )
+        if uses_api(self.config) and self.config.get("web_search", False):
+            req.system_prompt += (
+                "\n联网搜索：遇到近期信息或需要查证的事实时使用 search_public_web；"
+                "只提交公开主题，不传群聊原文、成员资料或本机信息。引用返回的来源链接。\n"
+            )
         if self.config.get("voice_enabled", False):
             req.system_prompt += (
                 "\n语音能力：用户要求语音祝福、说给他听或语音回复时，使用 send_voice。"
@@ -368,7 +375,7 @@ class LocalCodex(Star):
             self.cover_sources.discard(event)
         if accepted and self.config.get("video_summary_enabled", False):
             await self._prepare_video(event)
-        if self.config.get("integrate_plugins", False):
+        if uses_pipeline(self.config):
             # AstrBot 4.29 stores a suppression flag despite this method's name:
             # ProcessStage enters the default model pipeline when call_llm=False.
             event.should_call_llm(not accepted)
@@ -377,7 +384,7 @@ class LocalCodex(Star):
                     event,
                     douyin_video=bool(self.config.get("douyin_video_enabled", False)),
                 )
-                event.set_extra("selected_provider", PROVIDER_ID)
+                event.set_extra("selected_provider", provider_id(self.config))
                 event.set_extra("enable_streaming", False)
             return
         if not accepted:
@@ -400,7 +407,7 @@ class LocalCodex(Star):
 
     async def _prepare_video(self, event: AstrMessageEvent) -> None:
         """Replace authorized video attachments before the core downloads media."""
-        provider = self.context.get_provider_by_id(PROVIDER_ID)
+        provider = self.context.get_provider_by_id(provider_id(self.config))
         try:
             summary = await self.video_context.summarize(event, provider)
         except VideoContextError as error:
@@ -430,9 +437,9 @@ class LocalCodex(Star):
             yield event.plain_result("直接发文字即可聊天；群里请 @我。新对话：/new")
             event.stop_event()
             return
-        if self.config.get("integrate_plugins", False):
+        if uses_pipeline(self.config):
             event.should_call_llm(True)
-            event.set_extra("selected_provider", PROVIDER_ID)
+            event.set_extra("selected_provider", provider_id(self.config))
             yield event.request_llm(prompt=parts[1])
             return
         async for result in self._ask(event, parts[1]):
@@ -509,7 +516,7 @@ class LocalCodex(Star):
             if self.lock.locked():
                 yield event.plain_result("请等当前 Codex 请求完成后再重置对话。")
                 return
-            if self.config.get("integrate_plugins", False):
+            if uses_pipeline(self.config):
                 await self.context.conversation_manager.new_conversation(
                     event.unified_msg_origin
                 )
@@ -569,6 +576,19 @@ class LocalCodex(Star):
         if delivered is False or getattr(event, "proactive_send_failed", False):
             raise RuntimeError("图片已生成，但未确认发送成功。")
         return None
+
+    @filter.llm_tool(name="search_public_web")
+    async def search_public_web(self, event: AstrMessageEvent, query: str) -> str:
+        """Search public web information and return sources without sending a QQ message.
+
+        Args:
+            query(string): Public search topic, at most 300 characters; exclude private chat or member information.
+        """
+        if not uses_api(self.config) or not self.config.get("web_search", False):
+            raise PermissionError("API web search is disabled.")
+        if not is_allowed(self.config, event.get_platform_name(), event.get_sender_id(), event.get_group_id()):
+            raise PermissionError("This sender cannot search through the bridge.")
+        return await search_public_web(self.context, self.config, query)
 
     @filter.llm_tool(name="search_web_image")
     async def search_web_image(self, event: AstrMessageEvent, query: str):
@@ -666,6 +686,7 @@ class LocalCodex(Star):
         await self.profile_learner.close()
         await self.image_generator.stop()
         await self.singing.stop()
-        await self.runner.stop()
-        if self.config.get("integrate_plugins", False):
+        if self.runner is not None:
+            await self.runner.stop()
+        if not uses_api(self.config) and self.config.get("integrate_plugins", False):
             await self.context.provider_manager.terminate_provider(PROVIDER_ID)

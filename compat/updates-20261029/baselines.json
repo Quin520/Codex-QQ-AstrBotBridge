@@ -1,0 +1,222 @@
+[
+  {
+    "plugin": "core",
+    "upstream": "v4.29.3",
+    "patch": "core.patch",
+    "sha256": "d9a5975c440dfa0903701d83090d79b20f3ea2a7b4ab366bd1f8f28b1683c60a",
+    "files": [
+      "astrbot/core/platform/sources/aiocqhttp/aiocqhttp_message_event.py",
+      "tests/unit/test_aiocqhttp_audio_payload.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_listen_music",
+    "upstream": "c9f16bd99df83b50f5f307262bf989cd87ed5c30",
+    "patch": "astrbot_plugin_listen_music.patch",
+    "sha256": "60c9e225a44b60e786fd63e85c597b627ae366ef0a402af3836ede072efc697d",
+    "files": [
+      "core/accounts.py",
+      "core/bilibili.py",
+      "core/services.py",
+      "main.py",
+      "metadata.yaml",
+      "tests/test_accounts.py",
+      "tests/test_bilibili.py",
+      "tests/test_main.py",
+      "tests/test_media.py",
+      "tests/test_services.py",
+      "tests/test_settings.py",
+      "tests/test_windows_credentials.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_livingmemory",
+    "upstream": "a1e9c20a8c5fab93d6143f51be26fb1bbf8143ec",
+    "patch": "astrbot_plugin_livingmemory.patch",
+    "sha256": "e3db70b848325795ac2fb03b1f6752376e760ca173bf728154dd116b8081f614",
+    "files": [
+      "_conf_schema.json",
+      "core/base/config_validator.py",
+      "core/memory_scope.py",
+      "core/prompts/group_chat_prompt.txt",
+      "tests/test_bridge_memory_scope.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_music",
+    "upstream": "3e0ec6ab394da4b740a3318ce440ca523ecb229f",
+    "patch": "astrbot_plugin_music.patch",
+    "sha256": "36407597f9b02512a2ba90cf1fd41bdeb9c5969fecf826a4b9a84117c47aa78c",
+    "files": [
+      "core/platform/base.py",
+      "main.py",
+      "tests/test_bridge_music_compat.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_parser",
+    "upstream": "e226dfd2250b4855ad67c29da7965353ad9e1379",
+    "patch": "astrbot_plugin_parser.patch",
+    "sha256": "6f4c64200300385d49f55188e57ceb16420a95663e7efd5869f244333e31204c",
+    "files": [
+      "_conf_schema.json",
+      "core/clean.py",
+      "core/config.py",
+      "core/download.py",
+      "core/exception.py",
+      "core/parsers/shipinhao.py",
+      "core/parsers/xiaoheihe.py",
+      "core/sender.py",
+      "core/utils.py",
+      "main.py",
+      "tests/test_cache_expiry.py",
+      "tests/test_verification_preview.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_pokepro",
+    "upstream": "2d2c51c030860567227a860f062be90260649c4d",
+    "patch": "astrbot_plugin_pokepro.patch",
+    "sha256": "c53b134773994b9f30df292486431766716d93fc1bf321e96886b8b7dbe1e624",
+    "files": [
+      "core/on_poke.py",
+      "core/scheduler.py",
+      "core/send_poke.py",
+      "main.py",
+      "tests/test_delivery_and_commands.py",
+      "tests/test_scheduler.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_proactive_chat",
+    "upstream": "635fc18eeb84e3c7b58661425359244552286835",
+    "patch": "astrbot_plugin_proactive_chat.patch",
+    "sha256": "417cd7726beff537c397055fcfaa8ed706f92b38ab66debcc3090f2742c69981",
+    "files": [
+      "_conf_schema.json",
+      "admin/js/components/config/ConfigRenderer.jsx",
+      "admin/js/views/StatusView.jsx",
+      "core/chat_flow.py",
+      "core/data_storage.py",
+      "core/llm_adapter.py",
+      "core/message_events.py",
+      "core/message_sender.py",
+      "core/plugin_lifecycle.py",
+      "core/proactive_event.py",
+      "core/session_config.py",
+      "core/session_override_manager.py",
+      "core/session_parser.py",
+      "core/task_scheduler.py",
+      "core/web_admin_server.py",
+      "tests/test_bridge_sessions.py",
+      "tests/test_config_save_consistency.py",
+      "tests/test_console_auth.py",
+      "tests/test_group_only.py",
+      "tests/test_interval_config_ui.py",
+      "tests/test_interval_scheduling.py",
+      "tests/test_proactive_delivery_guard.py",
+      "tests/test_proactive_llm.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_qq_group_daily_analysis",
+    "upstream": "9e08f7dd8c18305735a81863e5ddb56baee850cb",
+    "patch": "astrbot_plugin_qq_group_daily_analysis.patch",
+    "sha256": "e4dc48f6419142d8eef61442c4f159a7730591d7318841ea15acbdfe8c5767e3",
+    "files": [
+      "dashboard/src/entities/trace/model/sla.ts",
+      "dashboard/src/vite-env.d.ts"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_self_learning",
+    "upstream": "7b747c9a18f09485feca8d1e61e5f2226dde8d39",
+    "patch": "astrbot_plugin_self_learning.patch",
+    "sha256": "cf40a8372ddbcb4ce8c85ffbce836e783ba4306d3e08df4846d58c581af295fe",
+    "files": [
+      "README.md",
+      "_conf_schema.json",
+      "config.py",
+      "core/page_api.py",
+      "core/plugin_lifecycle.py",
+      "docs/configuration.md",
+      "main.py",
+      "models/orm/affection.py",
+      "pages/dashboard/app.js",
+      "pages/dashboard/index.html",
+      "repositories/affection_repository.py",
+      "services/analysis/expression_pattern_learner.py",
+      "services/commands/handlers.py",
+      "services/core_learning/progressive_learning.py",
+      "services/database/facades/affection_facade.py",
+      "services/database/facades/jargon_facade.py",
+      "services/database/facades/learning_facade.py",
+      "services/database/sqlalchemy_database_manager.py",
+      "services/hooks/llm_hook_handler.py",
+      "services/jargon/jargon_miner.py",
+      "services/learning/affection_review.py",
+      "services/learning/approval_baseline.py",
+      "services/learning/expression_learning.py",
+      "services/learning/expression_review.py",
+      "services/learning/forgetting_manager.py",
+      "services/learning/persona_learning.py",
+      "services/learning/remember_service.py",
+      "services/persona/persona_updater.py",
+      "services/persona/temporary_persona_updater.py",
+      "services/response/response_diversity_manager.py",
+      "services/state/affection_manager.py",
+      "tests/conftest.py",
+      "tests/integration/test_metrics_service_endpoints.py",
+      "tests/integration/test_profile_review_access.py",
+      "tests/test_bridge_natural_style.py",
+      "tests/test_bridge_proactive_social.py",
+      "tests/unit/test_config.py",
+      "tests/unit/test_config_service.py",
+      "tests/unit/test_forgetting_manager.py",
+      "tests/unit/test_learning_approval_gate.py",
+      "web_src/src/components/business/LearningApprovalPanel.test.tsx",
+      "web_src/src/components/business/LearningApprovalPanel.tsx",
+      "web_src/src/components/business/ReviewCard.module.scss",
+      "web_src/src/components/business/ReviewCard.test.tsx",
+      "web_src/src/components/business/ReviewCard.tsx",
+      "web_src/src/pages/emotion/EmotionBoardPage.tsx",
+      "web_src/src/pages/home/HomePage.tsx",
+      "web_src/src/pages/insights/InsightsPage.tsx",
+      "web_src/src/pages/reviews/ReviewsPage.tsx",
+      "web_src/src/pages/shared.test.ts",
+      "web_src/src/pages/shared.ts",
+      "web_src/src/stores/dashboard.tsx",
+      "web_src/src/test/embedded-reviews.test.ts",
+      "webui/blueprints/hub.py",
+      "webui/blueprints/jargon.py",
+      "webui/blueprints/learning.py",
+      "webui/blueprints/metrics.py",
+      "webui/blueprints/persona_reviews.py",
+      "webui/services/learning_service.py",
+      "webui/services/metrics_service.py",
+      "webui/services/persona_review_service.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_stealer",
+    "upstream": "758f94a5b0848c8723a56d20af3da4b8ef3c4e61",
+    "patch": "astrbot_plugin_stealer.patch",
+    "sha256": "15109239f15809a6dfc18a448eb6ccd4bdb4cdb18e0b55da97053b9a53f181ae",
+    "files": [
+      "core/events/meme_sender_engine.py",
+      "main.py",
+      "tests/test_bridge_meme_coexistence.py"
+    ]
+  },
+  {
+    "plugin": "astrbot_plugin_voice_journal",
+    "upstream": "e38fde04320f91b0dd3967974c4270ff6efed832",
+    "patch": "astrbot_plugin_voice_journal.patch",
+    "sha256": "7d81a3e2df8bdc6905be48bd6bac00f4a0d9533201148279835996041c83c2a3",
+    "files": [
+      "_conf_schema.json",
+      "tests/test_service_web.py",
+      "web.py"
+    ]
+  }
+]

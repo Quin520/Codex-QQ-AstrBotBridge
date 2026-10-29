@@ -1,0 +1,3547 @@
+--- a/README.md
++++ b/README.md
+@@ -14,6 +14,12 @@
+ [功能](#核心功能) · [架构](#架构总览) · [安装](#快速开始) · [WebUI](#webui-dashboard) · [文档](#开发和文档) · [社区](#社区交流)
+ 
+ </div>
++
++<!-- Codex QQ profile review compatibility notice -->
++本地兼容修改：增加本机 Codex 桥接 v0.3.6 的个人相处设置审批。
++自学习采集消息后可生成针对当前成员的建议，在“审查队列 → 人格与个人设置”
++查看依据、编辑、批准或拒绝。未经批准不会写入桥接配置，也不修改全局人格。
++源码和回退说明：https://github.com/Quin520/Codex-QQ-AstrBotBridge/tree/main/compat/self_learning
+ 
+ > **版权与许可 / Copyright and License**
+ >
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -2,7 +2,7 @@
+   "Dependency_Install_Guide": {
+     "description": "依赖安装",
+     "type": "object",
+-    "hint": "依赖不会在插件安装或启动时自动安装。请进入插件 WebUI Dashboard 的全量设置顶部，手动点击基础能力依赖或全能力依赖。",
++    "hint": "本页是运行配置，不是待审列表。请在 AstrBot 侧栏打开自学习面板的“审查队列”，或打开独立 WebUI；两边使用同一份审批记录。[打开自学习面板](#/plugin-view/astrbot_plugin_self_learning/dashboard)。依赖可在面板全量设置顶部手动安装。",
+     "obvious_hint": true,
+     "items": {
+       "dependency_install_entry": {
+@@ -288,6 +288,12 @@
+         "type": "bool",
+         "hint": "【危险功能 - 谨慎开启】批准人格审查后自动将内容直接应用到当前使用的默认人格，而非创建新人格副本。开启后将直接覆盖正在使用的默认人格的系统提示词，此操作不可逆（除非从备份恢复）。强烈建议同时开启人格自动备份功能以防止数据丢失",
+         "default": false
++      },
++      "require_learning_approval": {
++        "description": "学习内容变化需审批",
++        "type": "bool",
++        "hint": "表达、人格、黑话等学习内容仅生成建议，批准后生效。聊天记录与临时上下文继续采集；好感度由“好感度系统设置”中的独立审批开关控制。",
++        "default": false
+       }
+     }
+   },
+@@ -382,6 +388,12 @@
+         "type": "bool",
+         "hint": "是否启用用户好感度和情绪响应系统",
+         "default": true
++      },
++      "require_affection_approval": {
++        "description": "好感度变化需审批",
++        "type": "bool",
++        "hint": "默认关闭，好感度涨跌直接生效并记录明细；开启后仅生成建议，批准后生效。与学习内容审批互不影响。切换不会自动批准或追补已有待审记录。",
++        "default": false
+       },
+       "max_total_affection": {
+         "description": "总好感度上限",
+--- a/config.py
++++ b/config.py
+@@ -255,6 +255,7 @@
+     backup_interval_hours: int = 24 # 备份间隔
+     max_backups_per_group: int = 10 # 每群最大备份数
+     auto_apply_approved_persona: bool = False # 审查批准后自动应用到默认人格（危险功能，默认关闭）
++    require_learning_approval: bool = False  # Gate learned content independently of affection.
+ 
+     # 高级设置
+     debug_mode: bool = False # 调试模式
+@@ -283,6 +284,7 @@
+ 
+     # 好感度系统配置
+     enable_affection_system: bool = True # 启用好感度系统
++    require_affection_approval: bool = False  # Independently review affection changes.
+     max_total_affection: int = 250 # bot总好感度满分值
+     max_user_affection: int = 100 # 单个用户最大好感度
+     affection_decay_rate: float = 0.95 # 好感度衰减比例
+@@ -566,6 +568,7 @@
+             backup_interval_hours=persona_backup_settings.get('backup_interval_hours', 24),
+             max_backups_per_group=persona_backup_settings.get('max_backups_per_group', 10),
+             auto_apply_approved_persona=advanced_settings.get('auto_apply_approved_persona', False),
++            require_learning_approval=advanced_settings.get('require_learning_approval', False),
+ 
+             debug_mode=debug_mode,
+             log_level=advanced_settings.get('log_level', 'debug' if debug_mode else 'info'),
+@@ -574,6 +577,7 @@
+ 
+             # 好感度系统配置
+             enable_affection_system=affection_settings.get('enable_affection_system', True),
++            require_affection_approval=affection_settings.get('require_affection_approval', False),
+             max_total_affection=affection_settings.get('max_total_affection', 250),
+             max_user_affection=affection_settings.get('max_user_affection', 100),
+             affection_decay_rate=affection_settings.get('affection_decay_rate', 0.95),
+--- a/core/page_api.py
++++ b/core/page_api.py
+@@ -338,6 +338,16 @@
+             container = self._container()
+             review_service = imports.PersonaReviewService(container)
+ 
++            if action == "affection_review":
++                from ..services.learning.affection_review import AffectionReviewService
++
++                decision = str(body.get("decision") or "")
++                if decision not in {"approve", "reject"}:
++                    return self._operation(False, "必须明确选择通过或驳回")
++                success, message = await AffectionReviewService(
++                    container.database_manager, container.plugin_config
++                ).decide(self._body_int(body, "id"), decision)
++                return self._operation(success, message)
+             if action == "review":
+                 success, message = await review_service.review_persona_update(
+                     str(body.get("id") or ""),
+@@ -981,9 +991,14 @@
+         review_service = imports.PersonaReviewService(container)
+         learning_service = imports.LearningService(container)
+         jargon_service = imports.JargonService(container)
+-        bounded_limit = max(1, min(limit or 50, 100))
+-
+-        pending, reviewed, style_reviews, pending_jargon = await asyncio.gather(
++        bounded_limit = max(0, min(limit, 100))
++        from ..services.learning.affection_review import AffectionReviewService
++
++        affection_service = AffectionReviewService(
++            container.database_manager, container.plugin_config
++        )
++
++        pending, reviewed, style_reviews, pending_jargon, affection = await asyncio.gather(
+             self._safe_section(
+                 "persona_pending",
+                 lambda: review_service.get_pending_persona_updates(
+@@ -997,7 +1012,7 @@
+             self._safe_section(
+                 "persona_reviewed",
+                 lambda: review_service.get_reviewed_persona_updates(
+-                    bounded_limit,
++                    bounded_limit or 50,
+                     max(0, offset),
+                     status_filter,
+                 ),
+@@ -1019,12 +1034,18 @@
+                     self._load_pending_jargon_reviews(
+                         jargon_service,
+                         keyword=jargon_keyword,
+-                        limit=min(bounded_limit, 50),
++                        limit=min(bounded_limit, 50) if bounded_limit else 200,
+                     )
+                 ),
+                 errors,
+                 default={"jargon_list": [], "total": 0},
+             ),
++            self._safe_section(
++                "affection_reviews",
++                lambda: affection_service.list_reviews("all"),
++                errors,
++                default=[],
++            ),
+         )
+ 
+         return {
+@@ -1032,6 +1053,15 @@
+             "persona_reviewed": reviewed,
+             "style_reviews": style_reviews,
+             "jargon_pending": pending_jargon,
++            "affection_reviews": {"reviews": affection, "total": len(affection)},
++            "approval_settings": {
++                "require_approval": bool(getattr(container.plugin_config, "require_learning_approval", False)),
++                "require_affection_approval": bool(getattr(container.plugin_config, "require_affection_approval", False)),
++            },
++            "pending_total": (
++                int(pending.get("total", 0)) + int(pending_jargon.get("total", 0))
++                + sum(row["status"] == "pending" for row in affection)
++            ),
+             "errors": errors,
+         }
+ 
+--- a/core/plugin_lifecycle.py
++++ b/core/plugin_lifecycle.py
+@@ -235,6 +235,7 @@
+                     group_id_to_unified_origin=group_id_to_unified_origin,
+                     db_manager=getattr(p, "db_manager", None),
+                     feature_delegation=getattr(p, "feature_delegation", None),
++                    context=p.context,
+                 )
+             else:
+                 p._hook_handler = None
+--- a/docs/configuration.md
++++ b/docs/configuration.md
+@@ -96,8 +96,21 @@
+ | `save_raw_messages` | `true` | 保存原始消息；关闭后依赖 `raw_messages` 表的学习功能（渐进学习、黑话挖掘等）将没有新数据 |
+ | `auto_backup_interval_days` | `7` | 自动备份间隔 |
+ | `auto_apply_approved_persona` | `false` | 批准后自动应用到默认人格，风险较高 |
++| `require_learning_approval` | `false` | 表达、人格、黑话等学习内容先审批；好感度使用独立开关 |
+ 
+ 日志等级会通过 `utils/logging_utils.py` 同步到 AstrBot logger。
++
++## 好感度审批
++
++配置组: `Affection_System_Settings`
++
++| 字段 | 默认值 | 说明 |
++| --- | --- | --- |
++| `require_affection_approval` | `false` | 默认直接应用好感度涨跌并记录明细；开启后须审批才生效 |
++
++AstrBot 插件配置和独立 WebUI 设置共用此字段。它与“高级设置 → 学习内容变化需审批”互相独立；开启学习内容审批不会开启好感度审批。旧配置未填写此字段时按关闭处理。
++
++切换只影响后续互动，不会自动批准、删除或追补已有的好感度待审建议。旧记录仍可查看；实际数值已变化的建议会按已有规则归入失效记录。两边的审查页面分别显示学习内容审批与好感度审批状态。
+ 
+ ## 数据库配置
+ 
+--- a/main.py
++++ b/main.py
+@@ -438,6 +438,12 @@
+             if self.plugin_config:
+                 self.plugin_config.total_messages_collected = self.learning_stats.total_messages_collected
+             self._log_message_capture_diag("saved:raw_message", event, message_text, level="info")
++            # Propose per-member changes only after the normal collection filters.
++            bridge = self.context.get_registered_star("astrbot_plugin_local_codex")
++            if bridge and bridge.activated and bridge.star_cls:
++                observer = getattr(bridge.star_cls, "observe_profile_message", None)
++                if observer:
++                    observer(event, self.llm_adapter)
+         else:
+             self._log_message_capture_diag("fail:raw_message_not_saved", event, message_text, level="info")
+ 
+--- a/models/orm/affection.py
++++ b/models/orm/affection.py
+@@ -46,6 +46,33 @@
+     )
+ 
+ 
++class AffectionReview(Base):
++    """Proposed changes; live affection remains untouched until approval."""
++    __tablename__ = 'affection_reviews'
++
++    id = Column(Integer, primary_key=True, autoincrement=True)
++    proposal_key = Column(String(64), unique=True, nullable=False)
++    group_id = Column(String(255), nullable=False, index=True)
++    user_id = Column(String(255), nullable=False)
++    previous_level = Column(Integer, nullable=False)
++    proposed_level = Column(Integer, nullable=False)
++    interaction_type = Column(String(50), nullable=False)
++    reason = Column(Text, nullable=False)
++    message = Column(Text, nullable=False)
++    mood = Column(Text, nullable=False)
++    status = Column(String(50), nullable=False, default='pending', index=True)
++    created_at = Column(Float, nullable=False)
++    reviewed_at = Column(Float)
++
++
++class ApprovalMigration(Base):
++    """Track one-time quarantine of unreviewed legacy learning outputs."""
++    __tablename__ = 'approval_migrations'
++
++    name = Column(String(100), primary_key=True)
++    completed_at = Column(Float, nullable=False)
++
++
+ class UserConversationHistory(Base):
+     """用户对话历史表"""
+     __tablename__ = 'user_conversation_history'
+--- a/pages/dashboard/app.js
++++ b/pages/dashboard/app.js
+@@ -27,6 +27,9 @@
+     dashboard: null,
+     overview: null,
+     pageData: {},
++    pageLoadedAt: {},
++    pageRequests: {},
++    profileDirty: false,
+     selectedReviews: {
+       persona: new Set(),
+       style: new Set(),
+@@ -322,7 +325,7 @@
+   }
+ 
+   function reviewSearchParams() {
+-    const params = { limit: 50 };
++    const params = { limit: 0 };
+     const personaKeyword = $("persona-review-keyword")?.value?.trim() || "";
+     const styleKeyword = $("style-review-keyword")?.value?.trim() || "";
+     const jargonKeyword = $("jargon-review-keyword")?.value?.trim() || "";
+@@ -346,9 +349,15 @@
+   }
+ 
+   function refreshSelectionLabels() {
++    const data = state.pageData.reviews || {};
++    const totals = {
++      persona: Math.max(0, Number(data.persona_pending?.total || 0) - Number(data.persona_pending?.source_counts?.style_learning || 0)),
++      style: data.style_reviews?.total,
++      jargon: data.jargon_pending?.total,
++    };
+     ["persona", "style", "jargon"].forEach((kind) => {
+       const ids = visibleReviewIds(kind);
+-      setText(`${kind}-review-count`, reviewCountText(kind, ids.length));
++      setText(`${kind}-review-count`, reviewCountText(kind, Number(totals[kind] ?? ids.length)));
+     });
+     setText("expression-review-count", t("selection.selectedCount", "已选 {count}").replace("{count}", fmt(selectedReviewIds("style").length, 0)));
+     const selectedJargon = Array.from(state.selectedJargon).filter(Boolean).length;
+@@ -490,13 +499,13 @@
+   }
+ 
+   async function loadDashboard(force = false) {
+-    if (state.dashboard && !force) {
++    if (state.dashboard && !force && Date.now() - (state.pageLoadedAt.dashboard || 0) < 60_000) {
+       renderDashboard(state.dashboard);
+       return state.dashboard;
+     }
+     setBusy(t("status.syncing", "同步中"));
+     try {
+-      const data = await apiGet("dashboard");
++      const data = await cached("dashboard", () => apiGet("dashboard"), force);
+       state.dashboard = data;
+       state.overview = data.overview || data;
+       renderDashboard(data);
+@@ -538,10 +547,14 @@
+   }
+ 
+   async function cached(key, loader, force) {
+-    if (!force && state.pageData[key]) return state.pageData[key];
++    if (!force && state.pageData[key] && Date.now() - (state.pageLoadedAt[key] || 0) < 60_000) return state.pageData[key];
++    const token = (state.pageRequests[key] || 0) + 1;
++    state.pageRequests[key] = token;
+     setBusy(t("status.loading", "加载中"));
+     const data = await loader();
++    if (state.pageRequests[key] !== token) return state.pageData[key] || data;
+     state.pageData[key] = data;
++    state.pageLoadedAt[key] = Date.now();
+     if (key.startsWith("reviews:")) state.pageData.reviews = data;
+     if (key.startsWith("style:")) state.pageData.style = data;
+     return data;
+@@ -673,10 +686,7 @@
+     if ((overview.runtime || {}).database_degraded) {
+       push("warn", t("insights.databaseDegraded", "数据库处于降级状态"), (overview.runtime || {}).database_error || t("insights.databaseNotReady", "数据库服务未完整启动。"), "monitoring");
+     }
+-    const pendingPersona = ((reviews.persona_pending || {}).updates || []).length;
+-    const pendingStyle = ((reviews.style_reviews || {}).reviews || []).length;
+-    const pendingJargon = (((reviews.jargon_pending || {}).jargon_list) || []).length;
+-    const totalBacklog = pendingPersona + pendingStyle + pendingJargon;
++    const totalBacklog = Number(reviews.pending_total || 0);
+     if (totalBacklog > 0) {
+       push("action", t("insights.reviewBacklog", "审查队列有积压"), t("insights.reviewBacklogDetail", "当前有 {count} 条学习结果等待确认。").replace("{count}", fmt(totalBacklog, 0)), "reviews");
+     }
+@@ -885,30 +895,57 @@
+   }
+ 
+   function renderReviews(data) {
++    if (state.profileDirty) return;
++    const approval = data.approval_settings || {};
++    setText("learning-approval-state", approval.require_approval === undefined
++      ? "学习内容审批：状态暂不可用。"
++      : approval.require_approval ? "学习内容审批：已开启。" : "学习内容审批：未开启强制审批。");
++    setText("affection-approval-state", approval.require_affection_approval === undefined
++      ? "好感度审批：状态暂不可用。"
++      : approval.require_affection_approval
++      ? "好感度审批：已开启，新的变化须批准后生效。"
++      : "好感度审批：已关闭，新的变化直接生效。已有待审记录保留，不会自动批准或追补。");
+     const personaPending = ((data.persona_pending || {}).updates || [])
+       .filter((item) => item && item.review_source !== "style_learning");
+     const personaReviewed = ((data.persona_reviewed || {}).updates || []);
+     const styleReviews = ((data.style_reviews || {}).reviews || []);
+     const pendingJargon = (((data.jargon_pending || {}).jargon_list) || []);
++    const affection = ((data.affection_reviews || {}).reviews || []);
++    const affectionPending = affection.filter(item => item.status === "pending");
++    const affectionStale = affection.filter(item => item.status === "stale");
++    setText("affection-review-count", `待处理 ${affectionPending.length} · 失效 ${affectionStale.length}`);
++    setHtml("affection-review-list", affectionPending.map(affectionReviewHtml).join("") || empty("暂无有效待审建议"));
++    setHtml("affection-review-history", affection.filter(item => item.status !== "pending").map(affectionReviewHtml).join("") || empty("暂无失效建议或处理历史"));
+     pruneSelection(selectedReviewSet("persona"), personaPending.map((item) => item.id));
+     pruneSelection(selectedReviewSet("style"), styleReviews.map((item) => item.id));
+     pruneSelection(selectedReviewSet("jargon"), pendingJargon.map((item) => item.id));
+-    setText("persona-review-count", reviewCountText("persona", personaPending.length));
+-    setText("style-review-count", reviewCountText("style", styleReviews.length));
+-    setText("jargon-review-count", reviewCountText("jargon", pendingJargon.length));
++    refreshSelectionLabels();
+     setText("reviewed-count", fmt(personaReviewed.length, 0));
+     setHtml("persona-review-list", personaPending.map((item) => personaReviewHtml(item)).join("") || empty(t("empty.personaUpdates", "暂无人格更新")));
+     setHtml("style-review-list", styleReviews.map((item) => styleReviewHtml(item)).join("") || empty(t("empty.styleReviews", "暂无表达审查")));
+     setHtml("jargon-review-list", pendingJargon.map((item) => jargonReviewHtml(item)).join("") || empty(t("empty.jargonCandidates", "暂无黑话候选")));
+     state.pageData.lastStyleItems = styleReviews;
+-    setHtml("reviewed-persona-list", personaReviewed.slice(0, 12).map((item) => `
++    setHtml("reviewed-persona-list", personaReviewed.map((item) => `
+       <div class="table-row">
+         <span>${escapeHtml(item.id)}</span>
+         <strong>${escapeHtml(item.status || item.review_status || "reviewed")}</strong>
+-        <small>${escapeHtml(item.reason || item.update_type || item.review_source || "")}</small>
++        <small>${escapeHtml(item.stale_reason || item.reason || item.update_type || item.review_source || "")}</small>
+       </div>
+     `).join("") || empty(t("empty.reviewed", "暂无已审查记录")));
+     showErrors(data.errors || {});
++  }
++
++  function affectionReviewHtml(item) {
++    const pending = item.status === "pending";
++    const labels = { pending: "待审", stale: "依据已变化", approved: "已通过", rejected: "已驳回" };
++    return `<article class="review-item"><div class="review-main">
++      <strong>QQ ${escapeHtml(item.user_id)}：${escapeHtml(item.before)} → ${escapeHtml(item.after)}</strong>
++      <small>群／会话 ${escapeHtml(item.group_id)} · ${escapeHtml(labels[item.status] || item.status)}</small>
++      <p>${escapeHtml(item.reason || "")}</p><blockquote>${escapeHtml(item.message || "")}</blockquote>
++      ${item.stale_reason ? `<p>${escapeHtml(item.stale_reason)}</p>` : ""}
++      </div><div class="row-actions">${pending ?
++        button("通过", `data-review-action="approve" data-kind="affection" data-id="${escapeAttr(item.id)}"`, "solid-button")
++        + button("驳回", `data-review-action="reject" data-kind="affection" data-id="${escapeAttr(item.id)}"`) : ""}</div></article>`;
+   }
+ 
+   function personaReviewHtml(item) {
+@@ -916,9 +953,10 @@
+     return `<article class="review-item selectable">
+       ${reviewCheckbox("persona", id)}
+       <div class="review-main">
+-        <strong>${escapeHtml(item.update_type || item.review_source || t("reviews.personaUpdates", "人格更新"))}</strong>
++        <strong>${escapeHtml(item.title || item.update_type || item.review_source || t("reviews.personaUpdates", "人格更新"))}</strong>
+         <small>${escapeHtml(item.group_id || "default")} · ${escapeHtml(item.reason || item.description || "")}</small>
+         <p>${escapeHtml(item.proposed_content || item.new_content || item.incremental_content || "").slice(0, 220)}</p>
++        ${item.review_source === "qq_profile" ? `<p>原值：${escapeHtml(item.before || "（空）")}</p><label>批准后的值（可修改）<textarea data-profile-value="${escapeAttr(id)}" rows="3">${escapeHtml(item.after || "")}</textarea></label><details><summary>聊天依据</summary>${(item.evidence || []).map(entry => `<blockquote>${escapeHtml(entry.text || "")}</blockquote>`).join("")}</details>` : ""}
+       </div>
+       <div class="row-actions">
+         ${button(t("actions.details", "详情"), `data-review-action="detail" data-kind="persona" data-id="${escapeAttr(id)}"`)}
+@@ -1802,6 +1840,7 @@
+   function findReviewItem(kind, id) {
+     const reviews = state.pageData.reviews || {};
+     const style = state.pageData.style || {};
++    if (kind === "affection") return ((reviews.affection_reviews || {}).reviews || []).find(item => String(item.id) === String(id));
+     if (kind === "persona") return ((reviews.persona_pending || {}).updates || []).find((item) => String(item.id) === String(id));
+     if (kind === "style") {
+       return (
+@@ -1818,10 +1857,18 @@
+       return;
+     }
+     let payload;
+-    if (kind === "persona") {
++    if (kind === "affection") {
++      if (!['approve', 'reject'].includes(action)) return;
++      if (!await showConfirm("确认好感度审批", "仅处理这条建议；通过后才修改好感度。", action === "approve" ? "通过" : "驳回")) return;
++      payload = { action: "affection_review", id, decision: action };
++    } else if (kind === "persona") {
+       payload = action === "delete"
+         ? { action: "delete", id }
+         : { action: "review", id, decision: action };
++      if (action === "approve" && findReviewItem(kind, id)?.review_source === "qq_profile") {
++        const editor = Array.from(document.querySelectorAll('[data-profile-value]')).find(element => element.dataset.profileValue === String(id));
++        if (editor) payload.modified_content = editor.value;
++      }
+     } else if (kind === "style") {
+       payload = { action: `style_${action}`, id };
+     } else {
+@@ -1829,7 +1876,10 @@
+     }
+     const result = await apiPost("reviews/action", payload);
+     showToast(result.message || t("messages.actionDone", "操作完成"), result.success ? "ok" : "error");
+-    selectedReviewSet(kind).delete(normalizeId(id));
++    if (!result.success) return;
++    state.profileDirty = false;
++    state.dashboard = null;
++    if (kind !== "affection") selectedReviewSet(kind).delete(normalizeId(id));
+     state.pageData.reviews = null;
+     await loadPageData(state.page, { force: true });
+   }
+@@ -2731,6 +2781,23 @@
+       await bridgeReady();
+       setI18nFromBridge();
+       navigateToPage(resolvePageFromHash(), { skipHash: true, force: true });
++      document.addEventListener("input", event => {
++        if (event.target.matches?.('[data-profile-value]')) state.profileDirty = true;
++      });
++      const refreshVisible = () => {
++        if (document.hidden || state.profileDirty || $("detail-modal")?.open
++          || document.activeElement?.matches("input, textarea, select")
++          || Object.values(state.selectedReviews).some(selected => selected.size)) return;
++        if (["home", "insights", "reviews", "expression-learning"].includes(state.page)) {
++          void loadPageData(state.page, { force: true });
++        }
++      };
++      const refreshTimer = window.setInterval(refreshVisible, 60_000);
++      window.addEventListener("focus", refreshVisible);
++      window.addEventListener("pagehide", () => {
++        window.clearInterval(refreshTimer);
++        window.removeEventListener("focus", refreshVisible);
++      }, { once: true });
+     } catch (error) {
+       showToast(error.message || String(error), "error");
+       setText("runtime-status", t("status.bridgeFailed", "桥接失败"));
+--- a/pages/dashboard/index.html
++++ b/pages/dashboard/index.html
+@@ -162,6 +162,7 @@
+             <div>
+               <h3 data-i18n="reviews.title">审查队列</h3>
+               <p data-i18n="reviews.desc">人格更新、表达学习和黑话候选集中处理。</p>
++              <p id="learning-approval-state">审批设置加载中</p>
+             </div>
+             <button class="ghost-button" type="button" data-refresh-page="reviews" data-i18n="actions.refresh">刷新</button>
+           </div>
+@@ -214,6 +215,13 @@
+               </div>
+               <div class="review-list" id="jargon-review-list"></div>
+             </div>
++          </div>
++          <div class="panel">
++            <div class="panel-heading"><h3>好感度审批</h3><span class="mini-badge" id="affection-review-count">加载中</span></div>
++            <p id="affection-approval-state">好感度审批设置加载中</p>
++            <p>与独立 WebUI 共用审批记录；原数值已变化的建议单独显示，不计入待处理。时间久不代表失效。</p>
++            <div class="review-list" id="affection-review-list"></div>
++            <details><summary>失效建议与处理历史</summary><div class="review-list" id="affection-review-history"></div></details>
+           </div>
+           <div class="panel reviewed-panel">
+             <div class="panel-heading">
+--- a/repositories/affection_repository.py
++++ b/repositories/affection_repository.py
+@@ -152,7 +152,9 @@
+         user_id: str,
+         interaction_type: str,
+         affection_delta: int,
+-        message: str = None
++        message: str = None,
++        *,
++        commit: bool = True,
+     ) -> Optional[AffectionInteraction]:
+         """
+         创建互动记录
+@@ -167,19 +169,28 @@
+         Returns:
+             Optional[AffectionInteraction]: 互动记录
+         """
+-        return await self.create(
+-            group_id=group_id,
+-            user_id=user_id,
++        affection = await AffectionRepository(self.session).get_by_group_and_user(
++            group_id, user_id
++        )
++        if affection is None:
++            raise ValueError("Cannot record interaction without an affection owner")
++        record = AffectionInteraction(
++            user_affection_id=affection.id,
+             interaction_type=interaction_type,
+             affection_delta=affection_delta,
+-            message=message,
++            message_content=message,
+             timestamp=int(time.time())
+         )
++        self.session.add(record)
++        await self.session.flush()
++        if commit:
++            await self.session.commit()
++        return record
+ 
+     async def get_recent_interactions(
+         self,
+         group_id: str,
+-        user_id: str,
++        user_id: Optional[str] = None,
+         limit: int = 50
+     ) -> List[AffectionInteraction]:
+         """
+@@ -194,14 +205,14 @@
+             List[AffectionInteraction]: 互动记录列表
+         """
+         try:
+-            stmt = select(AffectionInteraction).where(
+-                and_(
+-                    AffectionInteraction.group_id == group_id,
+-                    AffectionInteraction.user_id == user_id
+-                )
+-            ).order_by(
+-                AffectionInteraction.timestamp.desc()
+-            ).limit(limit)
++            stmt = select(AffectionInteraction).join(UserAffection).where(
++                UserAffection.group_id == group_id,
++            )
++            if user_id is not None:
++                stmt = stmt.where(UserAffection.user_id == user_id)
++            stmt = stmt.order_by(
++                AffectionInteraction.timestamp.desc(), AffectionInteraction.id.desc()
++            ).limit(max(1, min(int(limit), 200)))
+ 
+             result = await self.session.execute(stmt)
+             return list(result.scalars().all())
+--- a/services/analysis/expression_pattern_learner.py
++++ b/services/analysis/expression_pattern_learner.py
+@@ -465,6 +465,18 @@
+         user_id: Optional[str] = None,
+     ):
+         """保存表达模式到数据库（ORM 版本）"""
++        if getattr(getattr(self, "config", None), "require_learning_approval", False) is True:
++            from ..learning.expression_review import queue_patterns
++
++            await queue_patterns(
++                self.db_manager, group_id,
++                [{**p.to_dict(), "persona_id": normalize_persona_scope(
++                    p.persona_id, fallback=persona_id
++                ), "user_id": self._normalize_user_scope(p.user_id, fallback=user_id)}
++                 for p in patterns],
++                persona_id, source="表达学习",
++            )
++            return
+         try:
+             from sqlalchemy import desc, select
+             from ...models.orm.expression import ExpressionPattern as ExpressionPatternORM
+--- a/services/commands/handlers.py
++++ b/services/commands/handlers.py
+@@ -278,6 +278,10 @@
+                 content=content,
+                 persona_id=persona_id,
+             )
++
++            if getattr(self._config, "require_learning_approval", False):
++                yield event.plain_result("已提交表达学习建议，请在自学习管理页的审查队列确认后启用。重复的建议不会重复入队。")
++                return
+ 
+             yield event.plain_result(
+                 "已记住这段对话上下文，并同步到表达方式和对话示例。\n"
+--- a/services/core_learning/progressive_learning.py
++++ b/services/core_learning/progressive_learning.py
+@@ -760,6 +760,7 @@
+                         message_count=len(unprocessed_messages),
+                         filtered_count=len(filtered_messages),
+                         success=success,
++                        status='completed' if success else 'failed',
+                     )
+                     session.add(batch_record)
+                     await session.commit()
+--- a/services/database/facades/affection_facade.py
++++ b/services/database/facades/affection_facade.py
+@@ -9,10 +9,12 @@
+ 
+ from ._base import BaseFacade
+ try:
+-    from ....repositories.affection_repository import AffectionRepository
++    from ....repositories.affection_repository import AffectionRepository, InteractionRepository
++    from ....models.orm.affection import UserAffection
+     from ....repositories.bot_mood_repository import BotMoodRepository
+ except ImportError:
+-    from repositories.affection_repository import AffectionRepository
++    from repositories.affection_repository import AffectionRepository, InteractionRepository
++    from models.orm.affection import UserAffection
+     from repositories.bot_mood_repository import BotMoodRepository
+ 
+ 
+@@ -47,7 +49,10 @@
+         user_id: str,
+         new_level: int,
+         change_reason: str = "",
+-        bot_mood: str = ""
++        bot_mood: str = "",
++        *,
++        interaction_type: str = "adjustment",
++        message: str = "",
+     ) -> bool:
+         """更新用户好感度"""
+         try:
+@@ -55,14 +60,60 @@
+                 repo = AffectionRepository(session)
+                 current = await repo.get_by_group_and_user(group_id, user_id)
+                 previous_level = current.affection_level if current else 0
+-                affection_delta = new_level - previous_level
+-                affection = await repo.update_level(
+-                    group_id, user_id, affection_delta, max_affection=100
++                maximum = int(getattr(self.config, "max_user_affection", 100))
++                new_level = max(0, min(int(new_level), maximum))
++                now = int(time.time())
++                if current is None:
++                    current = UserAffection(
++                        group_id=group_id, user_id=user_id, created_at=now,
++                    )
++                    session.add(current)
++                current.affection_level = new_level
++                current.max_affection = maximum
++                current.updated_at = now
++                await session.flush()
++                # Keep the level and its explanation in the same transaction.
++                await InteractionRepository(session).create_interaction(
++                    group_id, user_id, interaction_type, new_level - previous_level,
++                    json.dumps({
++                        "message": message[:2000], "reason": change_reason,
++                        "mood": bot_mood, "previous_level": previous_level,
++                        "new_level": new_level,
++                    }, ensure_ascii=False),
++                    commit=False,
+                 )
+-                return affection is not None
++                await session.commit()
++                return True
+         except Exception as e:
+             self._logger.error(f"[AffectionFacade] 更新好感度失败: {e}")
+             return False
++
++    async def get_affection_history(
++        self, group_id: str, user_id: Optional[str] = None, limit: int = 50,
++    ) -> List[Dict[str, Any]]:
++        """Read persisted changes, including unchanged chat interactions."""
++        async with self.get_session() as session:
++            records = await InteractionRepository(session).get_recent_interactions(
++                group_id, user_id, limit
++            )
++            history = []
++            for record in records:
++                owner = await session.get(UserAffection, record.user_affection_id)
++                try:
++                    details = json.loads(record.message_content or "{}")
++                except (ValueError, TypeError):
++                    details = {"message": record.message_content or ""}
++                if not isinstance(details, dict):
++                    details = {}
++                history.append({
++                    "id": record.id, "user_id": owner.user_id,
++                    "interaction_type": record.interaction_type,
++                    "change": record.affection_delta, "timestamp": record.timestamp,
++                    **{key: details.get(key) for key in (
++                        "message", "reason", "mood", "previous_level", "new_level"
++                    )},
++                })
++            return history
+ 
+     async def get_all_user_affections(self, group_id: str) -> List[Dict[str, Any]]:
+         """获取群组所有用户好感度"""
+--- a/services/database/facades/jargon_facade.py
++++ b/services/database/facades/jargon_facade.py
+@@ -665,7 +665,7 @@
+                         content=gj.content,
+                         raw_content='[]',
+                         meaning=gj.meaning,
+-                        is_jargon=True,
++                        is_jargon=not getattr(self.config, "require_learning_approval", False),
+                         count=1,
+                         last_inference_count=0,
+                         is_complete=False,
+--- a/services/database/facades/learning_facade.py
++++ b/services/database/facades/learning_facade.py
+@@ -8,7 +8,7 @@
+ from astrbot.api import logger
+ 
+ from ._base import BaseFacade
+-from sqlalchemy import delete as sa_delete, desc, func, select
++from sqlalchemy import delete as sa_delete, desc, func, select, update
+ try:
+     from ....models.orm.learning import (
+         LearningBatch,
+@@ -802,6 +802,19 @@
+                 if not record:
+                     return False
+ 
++                if record.status != 'pending':
++                    return record.status == new_status
++                claimed = await session.execute(update(StyleLearningReview).where(
++                    StyleLearningReview.id == review_id,
++                    StyleLearningReview.status == 'pending',
++                ).values(status=new_status))
++                if claimed.rowcount != 1:
++                    await session.rollback()
++                    return False
++                if new_status == 'approved':
++                    from ...learning.expression_review import apply_patterns_in_session
++
++                    await apply_patterns_in_session(session, record)
+                 record.status = new_status
+                 record.reviewer_comment = reviewer_comment
+                 record.review_time = time.time()
+--- a/services/database/sqlalchemy_database_manager.py
++++ b/services/database/sqlalchemy_database_manager.py
+@@ -340,6 +340,9 @@
+             self._init_facades()
+             self._started = True
+             self._starting = False
++            from ..learning.approval_baseline import prepare_approval_baseline
++
++            await prepare_approval_baseline(self)
+             logger.info(f"[DomainRouter] 数据库启动成功 ({db_type})")
+             return True
+ 
+@@ -617,10 +620,19 @@
+     async def update_user_affection(
+         self, group_id: str, user_id: str, new_level: int,
+         change_reason: str = "", bot_mood: str = "",
++        *, interaction_type: str = "adjustment", message: str = "",
+     ) -> bool:
+         return await self._affection.update_user_affection(
+             self._affection_scope_key(group_id), user_id, new_level,
+             change_reason, bot_mood,
++            interaction_type=interaction_type, message=message,
++        )
++
++    async def get_affection_history(
++        self, group_id: str, user_id: Optional[str] = None, limit: int = 50,
++    ) -> List[Dict[str, Any]]:
++        return await self._affection.get_affection_history(
++            self._affection_scope_key(group_id), user_id, limit
+         )
+ 
+     async def get_all_user_affections(self, group_id: str) -> List[Dict[str, Any]]:
+--- a/services/hooks/llm_hook_handler.py
++++ b/services/hooks/llm_hook_handler.py
+@@ -12,6 +12,7 @@
+ """
+ 
+ import asyncio
++import sys
+ import time
+ from datetime import datetime
+ from typing import Any, Dict, List, Optional
+@@ -57,6 +58,7 @@
+         perf_tracker: ``PerfTracker`` for recording timing samples.
+         group_id_to_unified_origin: Shared mapping from group_id to UMO.
+         db_manager: Database manager for approved few-shot retrieval.
++        context: AstrBot context used to verify an active bridge integration.
+     """
+ 
+     def __init__(
+@@ -72,6 +74,7 @@
+         db_manager: Any = None,
+         feature_delegation: Any = None,
+         shadow_mode_service: Any = None,
++        context: Any = None,
+     ) -> None:
+         self._config = plugin_config
+         self._diversity_manager = diversity_manager
+@@ -84,6 +87,7 @@
+         self._db_manager = db_manager
+         self._feature_delegation = feature_delegation
+         self._shadow_mode_service = shadow_mode_service
++        self._context = context
+         self._command_filter = CommandFilter()
+         if self._shadow_mode_service is None and db_manager is not None:
+             try:
+@@ -129,7 +133,49 @@
+ 
+             group_id = event.get_group_id() or event.get_sender_id()
+             user_id = event.get_sender_id()
++            # A proactive group event carries the last speaker only as a hint.
++            # Check the installed event class, not user-controlled extra flags.
++            proactive_module = sys.modules.get(
++                "data.plugins.astrbot_plugin_proactive_chat.core.proactive_event"
++            )
++            proactive_type = getattr(proactive_module, "ProactiveMessageEvent", None)
++            proactive_group = bool(event.get_group_id()) and type(event) is proactive_type
++            if proactive_group:
++                user_id = ""
+             persona_id = get_event_persona_scope(event, self._config)
++
++            # Respect the bridge's fixed persona only for its authorized chats.
++            # Plugin text/extra flags cannot stand in for the installed class.
++            natural_chat = False
++            if self._context:
++                bridge = self._context.get_registered_star("astrbot_plugin_local_codex")
++                bridge_module = sys.modules.get(
++                    "data.plugins.astrbot_plugin_local_codex.main"
++                )
++                bridge_type = getattr(bridge_module, "LocalCodex", None)
++                instance = getattr(bridge, "star_cls", None)
++                if (
++                    bridge_type is not None
++                    and bridge
++                    and bridge.activated
++                    and type(instance) is bridge_type
++                    and instance.config.get("integrate_plugins", False)
++                    and instance.config.get("natural_chat_enabled", False)
++                ):
++                    allowed = bridge_module.is_allowed(
++                        instance.config,
++                        event.get_platform_name(),
++                        event.get_sender_id(),
++                        event.get_group_id(),
++                    )
++                    if proactive_group:
++                        allowed = (
++                            event.get_platform_name() == "aiocqhttp"
++                            and bool(str(instance.config.get("owner_qq", "")).strip())
++                            and event.get_group_id()
++                            == str(instance.config.get("group_qq", "")).strip()
++                        )
++                    natural_chat = bool(allowed)
+ 
+             # Maintain group_id → unified_msg_origin mapping
+             if hasattr(event, "unified_msg_origin") and event.unified_msg_origin:
+@@ -187,7 +233,7 @@
+                 t0 = time.time()
+                 try:
+                     diversity_result = await asyncio.wait_for(
+-                        self._fetch_diversity(group_id), timeout=_ctx_timeout
++                        self._fetch_diversity(group_id, natural_chat), timeout=_ctx_timeout
+                     )
+                 except asyncio.TimeoutError:
+                     logger.warning(f"[LLM Hook] diversity timed out ({_ctx_timeout}s)")
+@@ -292,13 +338,15 @@
+                 group_id=group_id,
+                 user_id=user_id,
+                 persona_id=persona_id,
+-                include_social_relations=self._config.include_social_relations,
+-                include_affection=self._config.include_affection_info,
++                include_social_relations=bool(user_id)
++                and self._config.include_social_relations,
++                include_affection=bool(user_id) and self._config.include_affection_info,
+                 include_mood=False,
+                 include_expression_patterns=self._config.enable_expression_patterns,
+                 include_psychological=True,
+-                include_behavior_guidance=social_enabled,
+-                include_conversation_goal=self._config.enable_goal_driven_chat,
++                include_behavior_guidance=bool(user_id) and social_enabled,
++                include_conversation_goal=bool(user_id)
++                and self._config.enable_goal_driven_chat,
+                 enable_protection=True,
+             )
+         except Exception as e:
+@@ -334,14 +382,16 @@
+             return False
+ 
+     @monitored
+-    async def _fetch_diversity(self, group_id: str) -> Optional[str]:
++    async def _fetch_diversity(
++        self, group_id: str, natural_chat: bool = False
++    ) -> Optional[str]:
+         try:
+             content = await self._diversity_manager.build_diversity_prompt_injection(
+                 "",
+                 group_id=group_id,
+-                inject_style=True,
+-                inject_pattern=True,
+-                inject_variation=True,
++                inject_style=not natural_chat,
++                inject_pattern=not natural_chat,
++                inject_variation=not natural_chat,
+                 inject_history=True,
+             )
+             return content.strip() if content else None
+--- a/services/jargon/jargon_miner.py
++++ b/services/jargon/jargon_miner.py
+@@ -652,12 +652,13 @@
+                 return
+ 
+             # 更新推断结果
+-            jargon.is_jargon = result['is_jargon']
++            review_required = getattr(self.config, "require_learning_approval", False)
++            jargon.is_jargon = False if review_required else result['is_jargon']
+             jargon.meaning = result['meaning']
+             jargon.last_inference_count = jargon.count
+ 
+             # 如果达到100次，标记为完成
+-            if jargon.count >= 100:
++            if jargon.count >= 100 and not review_required:
+                 jargon.is_complete = True
+ 
+             jargon.updated_at = datetime.now()
+@@ -707,7 +708,7 @@
+             return False
+ 
+         payload = dict(current) if current else self._jargon_to_dict(jargon)
+-        payload['is_jargon'] = True
++        payload['is_jargon'] = not getattr(self.config, "require_learning_approval", False)
+         payload['meaning'] = meaning
+         payload['updated_at'] = datetime.now()
+         await self.db.update_jargon(payload)
+--- /dev/null
++++ b/services/learning/affection_review.py
+@@ -0,0 +1,169 @@
++"""Manual approval of affection changes with atomic application and audit history."""
++
++import hashlib
++import json
++import time
++
++from sqlalchemy import and_, func, select, update
++
++from ...models.orm.affection import AffectionInteraction, AffectionReview, UserAffection
++from ..database.sqlalchemy_database_manager import _AFFECTION_USER_SCOPE
++
++
++class AffectionReviewService:
++    def __init__(self, db_manager, config):
++        self.db = db_manager
++        self.config = config
++
++    def _scope_changed(self, stored_group: str) -> bool:
++        """旧建议不能写入已经停用的好感度存储维度。"""
++        unified = str(getattr(self.config, "affection_scope", "per_group")).lower() == "per_user"
++        return (stored_group == _AFFECTION_USER_SCOPE) != unified
++
++    async def propose(self, group_id: str, user_id: str, previous: int,
++                      proposed: int, interaction_type: str, reason: str,
++                      message: str, mood: str) -> int:
++        """Queue a nonzero change; duplicate callbacks do not multiply it."""
++        if previous == proposed:
++            return 0
++        group_id = self.db._affection_scope_key(group_id)
++        now = time.time()
++        key = hashlib.sha256(json.dumps([
++            group_id, user_id, previous, proposed, interaction_type, message,
++            int(now // 300),
++        ], ensure_ascii=False).encode("utf-8")).hexdigest()
++        async with self.db.get_session() as session:
++            existing = await session.scalar(select(AffectionReview.id).where(
++                AffectionReview.proposal_key == key
++            ))
++            if existing:
++                return existing
++            record = AffectionReview(
++                proposal_key=key, group_id=group_id, user_id=user_id,
++                previous_level=previous, proposed_level=proposed,
++                interaction_type=interaction_type, reason=reason,
++                message=message[:2000], mood=mood, status="pending", created_at=now,
++            )
++            session.add(record)
++            await session.commit()
++            return record.id
++
++    async def list_reviews(self, status: str = "pending") -> list[dict]:
++        """Expose validity without changing stored decisions or evidence.
++
++        Args:
++            status: Effective review status to select, or ``all`` for history.
++
++        Returns:
++            Reviews classified against the current value and per-user limit.
++        """
++        async with self.db.get_session() as session:
++            query = (
++                select(AffectionReview, UserAffection.affection_level)
++                .outerjoin(
++                    UserAffection,
++                    and_(
++                        UserAffection.group_id == AffectionReview.group_id,
++                        UserAffection.user_id == AffectionReview.user_id,
++                    ),
++                )
++                .order_by(AffectionReview.created_at.desc())
++            )
++            if status != "all":
++                query = query.where(
++                    AffectionReview.status == ("pending" if status == "stale" else status)
++                )
++            records = (await session.execute(query)).all()
++            result = []
++            maximum = int(self.config.max_user_affection)
++            for row, current in records:
++                current = current or 0
++                stale_reason = ""
++                if row.status == "pending":
++                    if self._scope_changed(row.group_id):
++                        stale_reason = "好感度存储维度已变化，旧建议不能直接批准。"
++                    elif current != row.previous_level:
++                        stale_reason = f"当前好感度为 {current}，建议依据为 {row.previous_level}；原数值已变化，不能直接批准。"
++                    elif not 0 <= row.proposed_level <= maximum:
++                        stale_reason = "建议值超出当前好感度上限，不能直接批准。"
++                effective_status = "stale" if stale_reason else row.status
++                if status != "all" and status != effective_status:
++                    continue
++                result.append(
++                    {
++                        "id": row.id,
++                        "group_id": row.group_id,
++                        "user_id": row.user_id,
++                        "before": row.previous_level,
++                        "after": row.proposed_level,
++                        "change": row.proposed_level - row.previous_level,
++                        "reason": row.reason,
++                        "message": row.message,
++                        "mood": row.mood,
++                        "status": effective_status,
++                        "stored_status": row.status,
++                        "current_level": current,
++                        "stale_reason": stale_reason,
++                        "created_at": row.created_at,
++                        "reviewed_at": row.reviewed_at,
++                    }
++                )
++            return result
++
++    async def decide(self, review_id: int, action: str) -> tuple[bool, str]:
++        """Apply exactly the reviewed value; reject stale snapshots and double clicks."""
++        if action not in {"approve", "reject"}:
++            raise ValueError("Unsupported review action")
++        async with self.db.get_session() as session:
++            record = await session.get(AffectionReview, review_id)
++            if record is None or record.status != "pending":
++                return False, "建议不存在或已经处理"
++            if action == "approve" and self._scope_changed(record.group_id):
++                return False, "好感度存储维度已变化，请驳回旧建议后等待新的互动建议"
++            status = "approved" if action == "approve" else "rejected"
++            claimed = await session.execute(update(AffectionReview).where(
++                AffectionReview.id == review_id, AffectionReview.status == "pending"
++            ).values(status=status, reviewed_at=time.time()))
++            if claimed.rowcount != 1:
++                await session.rollback()
++                return False, "建议已被其他操作处理，请刷新"
++            if action == "reject":
++                await session.commit()
++                return True, "已驳回，好感度未改变"
++            owner = await session.scalar(select(UserAffection).where(
++                UserAffection.group_id == record.group_id,
++                UserAffection.user_id == record.user_id,
++            ))
++            previous = owner.affection_level if owner else 0
++            maximum = int(self.config.max_user_affection)
++            if previous != record.previous_level or not 0 <= record.proposed_level <= maximum:
++                await session.rollback()
++                return False, "当前数值或上限已变化，请驳回过期建议，等待新的互动建议"
++            total = await session.scalar(select(func.sum(UserAffection.affection_level)).where(
++                UserAffection.group_id == record.group_id
++            )) or 0
++            delta = record.proposed_level - previous
++            if delta > 0 and total + delta > int(self.config.max_total_affection):
++                await session.rollback()
++                return False, "超过群好感度总上限；不会自动扣减其他成员，请调整上限或驳回"
++            now = int(time.time())
++            if owner is None:
++                owner = UserAffection(
++                    group_id=record.group_id, user_id=record.user_id,
++                    created_at=now, max_affection=maximum,
++                )
++                session.add(owner)
++            owner.affection_level = record.proposed_level
++            owner.updated_at = now
++            await session.flush()
++            session.add(AffectionInteraction(
++                user_affection_id=owner.id, interaction_type=record.interaction_type,
++                affection_delta=delta, timestamp=now,
++                message_content=json.dumps({
++                    "message": record.message, "reason": record.reason,
++                    "mood": record.mood, "previous_level": previous,
++                    "new_level": record.proposed_level, "review_id": record.id,
++                }, ensure_ascii=False),
++            ))
++            await session.commit()
++            return True, "已批准并保存好感度变化"
+--- /dev/null
++++ b/services/learning/approval_baseline.py
+@@ -0,0 +1,56 @@
++"""Recover legacy unreviewed outputs into the owner's review queue once."""
++
++import json
++import time
++
++from sqlalchemy import select, update
++
++from ...models.orm.affection import ApprovalMigration
++from ...models.orm.expression import ExpressionGenerationResult, ExpressionPattern
++from ...models.orm.jargon import Jargon
++from ...models.orm.learning import LearningBatch, StyleLearningReview
++from .expression_review import pattern_key, queue_patterns_in_session
++
++
++async def prepare_approval_baseline(db) -> None:
++    """Quarantine unapproved examples, preserving accepted and rejected decisions."""
++    if not getattr(db.config, "require_learning_approval", False):
++        return
++    async with db.get_session() as session:
++        if await session.get(ApprovalMigration, "manual-learning-v1"):
++            return
++        approved = set()
++        for review in await session.scalars(select(StyleLearningReview).where(
++            StyleLearningReview.status == "approved"
++        )):
++            for pattern in json.loads(review.learned_patterns or "[]"):
++                if isinstance(pattern, dict):
++                    approved.add((review.group_id, *pattern_key(pattern)))
++        groups = {}
++        for pattern in await session.scalars(select(ExpressionPattern)):
++            if (pattern.group_id, pattern.persona_id, pattern.user_id,
++                    pattern.situation, pattern.expression) in approved:
++                continue
++            # Keep referenced generation history intact rather than silently dropping it.
++            linked = await session.scalar(select(ExpressionGenerationResult.id).where(
++                ExpressionGenerationResult.pattern_id == pattern.id
++            ).limit(1))
++            if linked:
++                raise RuntimeError("Legacy examples have generation history; manual migration required")
++            groups.setdefault(pattern.group_id, []).append(pattern.to_dict())
++            await session.delete(pattern)
++        await session.flush()
++        for group_id, patterns in groups.items():
++            await queue_patterns_in_session(
++                session, group_id, patterns, "default", "历史未审核样例",
++                include_active=True,
++            )
++        await session.execute(update(Jargon).where(
++            Jargon.is_jargon.is_(True), Jargon.is_complete.is_not(True)
++        ).values(is_jargon=False))
++        await session.execute(update(LearningBatch).where(
++            LearningBatch.status == "pending", LearningBatch.end_time.is_not(None),
++            LearningBatch.success.is_(True),
++        ).values(status="completed"))
++        session.add(ApprovalMigration(name="manual-learning-v1", completed_at=time.time()))
++        await session.commit()
+--- a/services/learning/expression_learning.py
++++ b/services/learning/expression_learning.py
+@@ -61,11 +61,18 @@
+                 except Exception as pair_err:
+                     logger.debug(f"提取 fewshot 对话对失败: {pair_err}")
+ 
++            if getattr(getattr(self.db_manager, "config", None), "require_learning_approval", False) is True:
++                from .expression_review import queue_patterns
++
++                await queue_patterns(
++                    self.db_manager, group_id, expression_patterns, persona_id,
++                    source="批次学习",
++                )
++                return
++
+             if expression_patterns:
+                 await self.save_expression_patterns(
+-                    group_id,
+-                    expression_patterns,
+-                    persona_id=persona_id,
++                    group_id, expression_patterns, persona_id=persona_id,
+                 )
+ 
+             few_shots_content = ""
+@@ -276,6 +283,11 @@
+         persona_id: str = "default",
+     ) -> None:
+         """Save expression patterns to the expression_patterns table."""
++        if getattr(getattr(self.db_manager, "config", None), "require_learning_approval", False) is True:
++            from .expression_review import queue_patterns
++
++            await queue_patterns(self.db_manager, group_id, patterns, persona_id)
++            return
+         try:
+             if not patterns:
+                 return
+--- /dev/null
++++ b/services/learning/expression_review.py
+@@ -0,0 +1,104 @@
++"""Persist learned examples only after review, preserving group/persona/user scope."""
++
++import json
++import time
++from datetime import datetime
++
++from sqlalchemy import select
++
++from ...constants import UPDATE_TYPE_STYLE_LEARNING
++from ...models.orm.expression import ExpressionPattern
++from ...models.orm.learning import StyleLearningReview
++from ...utils.persona_selection import normalize_persona_scope
++
++
++def pattern_key(pattern: dict, persona_id: str = "default") -> tuple:
++    return (
++        normalize_persona_scope(pattern.get("persona_id"), fallback=persona_id),
++        pattern.get("user_id") or None,
++        str(pattern.get("situation", "")).strip(),
++        str(pattern.get("expression", "")).strip(),
++    )
++
++
++async def queue_patterns(db, group_id: str, patterns: list[dict],
++                         persona_id: str = "default", source: str = "learning",
++                         *, include_active: bool = False) -> int:
++    """Deduplicate proposals against active and already reviewed examples."""
++    from .expression_learning import ExpressionLearningModule
++
++    patterns = ExpressionLearningModule.filter_expression_patterns(patterns)
++    async with db.get_session() as session:
++        count = await queue_patterns_in_session(
++            session, group_id, patterns, persona_id, source, include_active=include_active
++        )
++        await session.commit()
++        return count
++
++
++async def queue_patterns_in_session(session, group_id: str, patterns: list[dict],
++                                    persona_id: str, source: str,
++                                    *, include_active: bool = False) -> int:
++    """Queue all valid examples in reviewable chunks; caller owns the transaction."""
++    known = set()
++    reviews = await session.scalars(select(StyleLearningReview).where(
++        StyleLearningReview.group_id == group_id
++    ))
++    for review in reviews:
++        for pattern in json.loads(review.learned_patterns or "[]"):
++            if isinstance(pattern, dict):
++                known.add(pattern_key(pattern))
++    if not include_active:
++        active = await session.scalars(select(ExpressionPattern).where(
++            ExpressionPattern.group_id == group_id
++        ))
++        known.update((p.persona_id, p.user_id, p.situation, p.expression) for p in active)
++    fresh = []
++    for pattern in patterns:
++        key = pattern_key(pattern, persona_id)
++        if not key[2] or not key[3] or key in known:
++            continue
++        known.add(key)
++        fresh.append({**pattern, "persona_id": key[0], "user_id": key[1]})
++    for offset in range(0, len(fresh), 10):
++        batch = fresh[offset:offset + 10]
++        now = time.time()
++        session.add(StyleLearningReview(
++            type=UPDATE_TYPE_STYLE_LEARNING, group_id=group_id, timestamp=now,
++            learned_patterns=json.dumps(batch, ensure_ascii=False), status="pending",
++            few_shots_content="\n\n".join(
++                f"A: {p['situation']}\nB: {p['expression']}" for p in batch
++            ),
++            description=f"待批准的表达样例（{len(batch)} 条，来源：{source}）",
++            metadata_=json.dumps({"source": source, "approval_gated": True}),
++            created_at=datetime.fromtimestamp(now), updated_at=datetime.fromtimestamp(now),
++        ))
++    await session.flush()
++    return len(fresh)
++
++
++async def apply_patterns_in_session(session, review) -> None:
++    """Activate the approved examples in the same transaction as review status."""
++    patterns = json.loads(review.learned_patterns or "[]")
++    for pattern in patterns:
++        if not isinstance(pattern, dict):
++            continue
++        persona_id, user_id, situation, expression = pattern_key(pattern)
++        if not situation or not expression:
++            continue
++        existing = await session.scalar(select(ExpressionPattern.id).where(
++            ExpressionPattern.group_id == review.group_id,
++            ExpressionPattern.persona_id == persona_id,
++            ExpressionPattern.user_id == user_id,
++            ExpressionPattern.situation == situation,
++            ExpressionPattern.expression == expression,
++        ))
++        if existing:
++            continue
++        now = time.time()
++        session.add(ExpressionPattern(
++            group_id=review.group_id, persona_id=persona_id, user_id=user_id,
++            situation=situation, expression=expression,
++            weight=float(pattern.get("weight", 1.0)),
++            last_active_time=now, create_time=now,
++        ))
+--- a/services/learning/forgetting_manager.py
++++ b/services/learning/forgetting_manager.py
+@@ -57,7 +57,16 @@
+ 
+     @property
+     def enabled(self) -> bool:
+-        return bool(getattr(self._config, "enable_expression_forgetting", True))
++        # 删除已审核的学习成果也是学习变更；现有审批器尚不接收遗忘提案。
++        # 审批模式下仅允许面板中逐项确认删除，不能由新版默认开启的定时任务删除。
++        return (
++            bool(getattr(self._config, "enable_expression_forgetting", True))
++            and not self.approval_required
++        )
++
++    @property
++    def approval_required(self) -> bool:
++        return bool(getattr(self._config, "require_learning_approval", False))
+ 
+     @property
+     def cycle_days(self) -> int:
+@@ -140,6 +149,10 @@
+             "expression": {"checked": 0, "reset": 0, "advanced": 0, "deleted": 0, "protected": 0},
+             "jargon": {"checked": 0, "reset": 0, "advanced": 0, "deleted": 0, "protected": 0},
+         }
++        if self.approval_required:
++            report["skipped"] = "审批模式已阻止自动遗忘；请在面板逐项确认删除"
++            self._last_report = report
++            return report
+         if not self._database_manager:
+             report["skipped"] = "数据库不可用"
+             self._last_report = report
+@@ -407,6 +420,7 @@
+ 
+         return {
+             "enabled": self.enabled,
++            "approval_required": self.approval_required,
+             "config": {
+                 "cycle_days": self.cycle_days,
+                 "grace_days": self.grace_days,
+--- a/services/learning/persona_learning.py
++++ b/services/learning/persona_learning.py
+@@ -244,9 +244,11 @@
+             if style_analysis_dict is None:
+                 return False
+ 
+-            update_success = await self.persona_manager.update_persona(
+-                group_id, style_analysis_dict, messages
+-            )
++            update_success = True
++            if not getattr(self.config, "require_learning_approval", False):
++                update_success = await self.persona_manager.update_persona(
++                    group_id, style_analysis_dict, messages
++                )
+             if not update_success:
+                 logger.error(f"通过 PersonaManagerService 更新人格失败 for group {group_id}")
+ 
+--- a/services/learning/remember_service.py
++++ b/services/learning/remember_service.py
+@@ -73,6 +73,13 @@
+         persona_id = normalize_persona_scope(persona_id)
+ 
+         result = RememberResult()
++        if getattr(self._db.config, "require_learning_approval", False):
++            from .expression_review import queue_patterns
++
++            await queue_patterns(self._db, group_id, [{
++                "situation": situation, "expression": expression, "weight": 2.0,
++            }], persona_id, source="remember 命令")
++            return result
+         result.memory_id = await self._db.save_manual_memory(
+             group_id=group_id,
+             user_id=sender_id,
+--- a/services/persona/persona_updater.py
++++ b/services/persona/persona_updater.py
+@@ -89,6 +89,18 @@
+                 return False
+ 
+             persona_name = get_persona_identifier(current_persona, 'unknown')
++            if getattr(self.config, "require_learning_approval", False):
++                proposed = str(style_analysis.get('enhanced_prompt') or '').strip()
++                original = current_persona.get('prompt', '')
++                if proposed:
++                    await self.db_manager.add_persona_learning_review(
++                        group_id=group_id, proposed_content=proposed,
++                        learning_source='persona_learning', confidence_score=0.75,
++                        raw_analysis='Style update queued for manual approval',
++                        metadata={'approval_gated': True}, original_content=original,
++                        new_content=self._merge_prompts(original, proposed),
++                    )
++                return True
+             self._logger.info(f"当前人格: {persona_name} for group {group_id}")
+             
+             # 创建备份（如果启用）
+--- a/services/persona/temporary_persona_updater.py
++++ b/services/persona/temporary_persona_updater.py
+@@ -199,6 +199,10 @@
+         try:
+             # 验证example_dialogs不包含虚假对话
+             validated_dialogs = await self._validate_dialog_authenticity(example_dialogs)
++
++            if getattr(self.config, "require_learning_approval", False):
++                content = '\n'.join([*new_features, *validated_dialogs])
++                return await self._queue_persona_text(group_id, content)
+             
+             # 检查是否已有活动的临时人格
+             if group_id in self.active_temp_personas:
+@@ -544,6 +548,12 @@
+                 return False
+             
+             logger.info(f"找到 {len(updates)} 个有效更新")
++
++            if getattr(self.config, "require_learning_approval", False):
++                queued = await self._queue_persona_text(group_id, "\n".join(updates))
++                if queued:
++                    await self._clear_persona_updates_file()
++                return queued
+             
+             # 创建备份
+             backup_path = await self.create_strict_persona_backup(group_id, "增量更新前备份")
+@@ -704,6 +714,9 @@
+             
+             # 1. 创建基于情绪的增量更新内容
+             mood_update = f"~ 当前情绪状态: {mood_description}，请根据此情绪调整回复的语气和风格"
++
++            if getattr(self.config, "require_learning_approval", False):
++                return await self._queue_persona_text(group_id, mood_update)
+             
+             # 2. 根据配置选择更新方式
+             if self.config.use_persona_manager_updates and self.persona_manager_updater.is_available():
+@@ -869,6 +882,11 @@
+ 
+     async def apply_expression_style_learning(self, group_id: str, expression_patterns: List[Dict[str, Any]]) -> bool:
+         """应用表达风格学习结果到人格"""
++        if getattr(self.config, "require_learning_approval", False):
++            from ..learning.expression_review import queue_patterns
++
++            await queue_patterns(self.db_manager, group_id, expression_patterns)
++            return True
+         try:
+             if not expression_patterns:
+                 logger.debug(f"群组 {group_id} 没有新的表达风格模式需要应用")
+@@ -919,6 +937,8 @@
+ 
+     async def apply_temporary_style_update(self, group_id: str, style_content: str) -> bool:
+         """临时应用风格更新到当前prompt（不修改人格文件）"""
++        if getattr(self.config, "require_learning_approval", False):
++            return await self._queue_persona_text(group_id, style_content)
+         try:
+             # 获取当前人格
+             persona = await self._get_framework_persona(group_id)
+@@ -968,6 +988,14 @@
+             dialog_pairs: A/B 对话对列表，每个元素为 (user_msg, assistant_msg)
+         """
+         MAX_STYLE_PAIRS = 10
++
++        if getattr(self.config, "require_learning_approval", False):
++            from ..learning.expression_review import queue_patterns
++
++            await queue_patterns(self.db_manager, group_id, [
++                {"situation": user, "expression": bot} for user, bot in dialog_pairs
++            ])
++            return True
+ 
+         try:
+             if not dialog_pairs:
+@@ -1040,6 +1068,24 @@
+             logger.error(f"begin_dialogs 风格注入失败 for group {group_id}: {e}")
+             return False
+ 
++    async def _queue_persona_text(self, group_id: str, content: str) -> bool:
++        """Route temporary learned personality changes through the same review UI."""
++        if not content.strip():
++            return False
++        pending = await self.db_manager.get_pending_persona_learning_reviews()
++        if any(row.get('group_id') == group_id and row.get('proposed_content') == content for row in pending):
++            return True
++        persona = await self._get_framework_persona(group_id) or {}
++        original = persona.get('prompt', '')
++        review_id = await self.db_manager.add_persona_learning_review(
++            group_id=group_id, proposed_content=content,
++            learning_source=UPDATE_TYPE_PROGRESSIVE_PERSONA_LEARNING,
++            confidence_score=0.75, raw_analysis='Temporary style queued for approval',
++            metadata={'approval_gated': True}, original_content=original,
++            new_content=original + '\n\n' + content,
++        )
++        return bool(review_id)
++
+     async def _append_to_persona_updates_file(self, update_content: str):
+         """向人格更新文件追加内容（带去重逻辑）"""
+         try:
+--- a/services/response/response_diversity_manager.py
++++ b/services/response/response_diversity_manager.py
+@@ -60,7 +60,7 @@
+         self.current_response_pattern = None
+ 
+         # 去重缓存: 同一group_id在短时间窗口内的重复调用直接返回缓存结果
+-        self._dedup_cache: Dict[str, Tuple[float, str]] = {}
++        self._dedup_cache: Dict[tuple, Tuple[float, str]] = {}
+         self._dedup_window = 5.0  # 5秒去重窗口
+ 
+         # 回复模式池
+@@ -244,9 +244,13 @@
+         """
+         try:
+             # 去重: 同一group在短时间窗口内的第二次调用直接返回已生成的结果
++            cache_key = (
++                group_id, inject_style, inject_pattern, inject_variation,
++                inject_history, enable_protection,
++            )
+             if group_id:
+                 now = time.time()
+-                cached_entry = self._dedup_cache.get(group_id)
++                cached_entry = self._dedup_cache.get(cache_key)
+                 if cached_entry and (now - cached_entry[0]) < self._dedup_window:
+                     logger.debug(f"[多样性管理器] 去重命中 (group={group_id})")
+                     return cached_entry[1] if not base_prompt else base_prompt + "\n\n" + cached_entry[1]
+@@ -332,7 +336,7 @@
+             # 缓存去重: 仅缓存注入部分（不含base_prompt），供后续调用复用
+             if group_id:
+                 injection_part = enhanced_prompt[len(base_prompt):]
+-                self._dedup_cache[group_id] = (time.time(), injection_part.strip())
++                self._dedup_cache[cache_key] = (time.time(), injection_part.strip())
+ 
+             return enhanced_prompt
+ 
+--- a/services/state/affection_manager.py
++++ b/services/state/affection_manager.py
+@@ -659,7 +659,7 @@
+         return None
+ 
+     async def update_affection(self, group_id: str, user_id: str, 
+-                             interaction_type: InteractionType) -> Dict[str, Any]:
++                             interaction_type: InteractionType, message: str = "") -> Dict[str, Any]:
+         """更新用户好感度。
+ 
+         整个「读取当前值 → 计算变化 → 检查总量 → 写入」过程持有同一把锁，
+@@ -669,17 +669,18 @@
+             group_id: 会话所属群号（per_user 模式下由存储层统一映射）。
+             user_id: 用户 QQ 号。
+             interaction_type: 交互类型，决定加分规则。
++            message: 本次交互的原始依据，供审批或变化历史查看。
+ 
+         Returns:
+             包含 success / current_level / change 等字段的结果字典。
+         """
+         async with self._affection_lock:
+             return await self._update_affection_locked(
+-                group_id, user_id, interaction_type
++                group_id, user_id, interaction_type, message
+             )
+ 
+     async def _update_affection_locked(self, group_id: str, user_id: str,
+-                                       interaction_type: InteractionType) -> Dict[str, Any]:
++                                       interaction_type: InteractionType, message: str = "") -> Dict[str, Any]:
+         """update_affection 的实际实现，调用方必须已持有 _affection_lock。"""
+         try:
+             # 获取当前好感度
+@@ -696,6 +697,24 @@
+             change_result = self._calculate_affection_change(
+                 interaction_type, current_level, current_mood
+             )
++
++            if getattr(self.config, "require_affection_approval", False):
++                from ..learning.affection_review import AffectionReviewService
++
++                proposed = max(0, min(
++                    current_level + (change_result['change'] if change_result['can_change'] else 0),
++                    self.config.max_user_affection,
++                ))
++                mood = f"{current_mood.mood_type.value}({current_mood.intensity:.2f})" if current_mood else "unknown"
++                review_id = await AffectionReviewService(self.db_manager, self.config).propose(
++                    group_id, user_id, current_level, proposed, interaction_type.value,
++                    change_result['reason'], message, mood,
++                )
++                return {
++                    'success': True, 'pending_review': bool(review_id), 'review_id': review_id,
++                    'previous_level': current_level, 'new_level': current_level,
++                    'change': 0, 'proposed_level': proposed, 'reason': change_result['reason'],
++                }
+             
+             # 处理情绪动态响应
+             await self._handle_mood_response(group_id, interaction_type, current_mood)
+@@ -722,7 +741,8 @@
+             mood_str = f"{current_mood.mood_type.value}({current_mood.intensity:.2f})" if current_mood else "unknown"
+             success = await self.db_manager.update_user_affection(
+                 group_id, user_id, new_level,
+-                change_result['reason'], mood_str
++                change_result['reason'], mood_str,
++                interaction_type=interaction_type.value, message=message,
+             )
+             
+             if success:
+@@ -1089,7 +1109,7 @@
+             self._logger.info(f"交互类型分析结果: {interaction_type.value} (group: {group_id})")
+             
+             # 2. 更新好感度
+-            affection_result = await self.update_affection(group_id, user_id, interaction_type)
++            affection_result = await self.update_affection(group_id, user_id, interaction_type, message)
+             if affection_result.get('success'):
+                 self._logger.info(f"好感度更新成功: 用户{user_id[:8]}... 在群{group_id} 的好感度从 {affection_result.get('previous_level', 0)} 变为 {affection_result.get('new_level', 0)} (变化: {affection_result.get('change', 0)})")
+             else:
+@@ -1100,7 +1120,7 @@
+             
+             # 4. 返回完整的处理结果
+             return {
+-                'success': True,
++                'success': bool(affection_result.get('success')),
+                 'interaction_type': interaction_type.value,
+                 'affection_result': affection_result,
+                 'current_mood': {
+@@ -1119,4 +1139,4 @@
+                 'interaction_type': 'unknown',
+                 'affection_result': {'success': False, 'reason': '系统错误'},
+                 'current_mood': None
+-            }
+\ No newline at end of file
++            }
+--- a/tests/conftest.py
++++ b/tests/conftest.py
+@@ -132,6 +132,7 @@
+         {'user_id': 'u3', 'affection_level': 20},
+     ])
+     manager.get_total_affection = AsyncMock(return_value=150)
++    manager.get_affection_history = AsyncMock(return_value=[])
+ 
+     return manager
+ 
+--- a/tests/integration/test_metrics_service_endpoints.py
++++ b/tests/integration/test_metrics_service_endpoints.py
+@@ -35,6 +35,9 @@
+             {"user_id": "u2", "affection_level": 50},
+             {"user_id": "u3", "affection_level": 20},
+         ]
++
++    async def get_affection_history(self, group_id):
++        return [{"user_id": "u1", "previous_level": 75, "new_level": 80, "change": 5}]
+ 
+ 
+ class DummyIntelligenceMetricsService:
+@@ -98,6 +101,8 @@
+ 
+     assert "error" not in data
+     assert data["total_users"] == 3
++    assert len(data["users"]) == 3
++    assert data["history"][0]["change"] == 5
+     assert data["average_affection"] == 50.0
+     assert data["high_affection_count"] == 1  # level 80 >= 70
+     assert data["low_affection_count"] == 1  # level 20 <= 30
+--- /dev/null
++++ b/tests/integration/test_profile_review_access.py
+@@ -0,0 +1,32 @@
++"""Passwordless profile reviews must stay local; password mode still authenticates."""
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import pytest
++
++from webui.compat import Quart
++from webui.blueprints import persona_reviews
++from webui.middleware import auth
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("address,enabled,status", [
++    ("127.0.0.1", False, 200),
++    ("::1", False, 200),
++    ("198.51.100.10", False, 403),
++    ("127.0.0.1", True, 401),
++    ("198.51.100.10", True, 401),
++])
++async def test_profile_review_access(monkeypatch, address, enabled, status):
++    container = SimpleNamespace(plugin_config=SimpleNamespace(enable_webui_password=enabled))
++    monkeypatch.setattr(persona_reviews, "get_container", lambda: container)
++    monkeypatch.setattr(auth, "get_container", lambda: container)
++    service = SimpleNamespace(get_pending_persona_updates=AsyncMock(return_value={"success": True, "updates": []}))
++    monkeypatch.setattr(persona_reviews, "PersonaReviewService", lambda _: service)
++    app = Quart("profile-review-access-test")
++    app.register_blueprint(persona_reviews.persona_reviews_bp)
++    client = app.test_client(client=(address, 50000))
++    response = await client.get("/api/persona_updates")
++    assert response.status_code == status
++    if status != 200:
++        service.get_pending_persona_updates.assert_not_awaited()
+--- /dev/null
++++ b/tests/test_bridge_natural_style.py
+@@ -0,0 +1,167 @@
++"""Preserve configured Codex persona without altering background learning calls.
++
++Uses the companion proactive identity test's isolated AstrBot setup. Set
++SELF_LEARNING_DIVERSITY_FILE to validate a staged diversity manager.
++"""
++
++import importlib
++import importlib.util
++import os
++import sys
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock
++
++import test_bridge_proactive_social as fixture
++
++BRIDGE_NAME = "data.plugins.astrbot_plugin_local_codex"
++bridge_path = Path(
++    os.environ.get(
++        "CODEX_BRIDGE_PLUGIN_DIR", fixture.PLUGIN.parent / "astrbot_plugin_local_codex"
++    )
++)
++package = ModuleType(BRIDGE_NAME)
++package.__path__ = [str(bridge_path)]
++sys.modules[BRIDGE_NAME] = package
++bridge_module = importlib.import_module(BRIDGE_NAME + ".main")
++
++DIVERSITY_NAME = fixture.SELF_MODULE + ".services.response.response_diversity_manager"
++if override := os.environ.get("SELF_LEARNING_DIVERSITY_FILE"):
++    spec = importlib.util.spec_from_file_location(DIVERSITY_NAME, override)
++    diversity_module = importlib.util.module_from_spec(spec)
++    sys.modules[DIVERSITY_NAME] = diversity_module
++    spec.loader.exec_module(diversity_module)
++else:
++    diversity_module = importlib.import_module(DIVERSITY_NAME)
++
++
++class NaturalStyleTests(unittest.IsolatedAsyncioTestCase):
++    event = fixture.ProactiveSocialTests.event
++    run_hook = fixture.ProactiveSocialTests.run_hook
++
++    def setUp(self):
++        fixture.ProactiveSocialTests.setUp(self)
++        self.bridge = bridge_module.LocalCodex.__new__(bridge_module.LocalCodex)
++        self.bridge.config = {
++            "integrate_plugins": True,
++            "natural_chat_enabled": True,
++            "owner_qq": "123",
++            "group_qq": "456",
++        }
++        self.star = SimpleNamespace(activated=True, star_cls=self.bridge)
++        self.hook._context = SimpleNamespace(get_registered_star=lambda name: self.star)
++        self.database = SimpleNamespace(
++            get_recent_bot_responses=AsyncMock(return_value=["PREVIOUS_OPENING"])
++        )
++        self.diversity = diversity_module.ResponseDiversityManager(
++            SimpleNamespace(), self.database
++        )
++        self.diversity._enable_protection = False
++        self.diversity.get_random_language_style = lambda: "RANDOM_STYLE"
++        self.diversity.get_random_response_pattern = lambda: "RANDOM_PATTERN"
++        self.diversity.get_expression_variation = lambda: {
++            "sentence_style": "RANDOM_SENTENCE",
++            "tone": "RANDOM_TONE",
++            "emphasis": "RANDOM_EMPHASIS",
++        }
++        self.hook._diversity_manager = self.diversity
++
++    def assert_stable(self, text):
++        self.assertIn("PREVIOUS_OPENING", text)
++        self.assertNotIn("RANDOM_", text)
++
++    async def test_authorized_group_retains_history_without_random_persona(self):
++        text = await self.run_hook(self.event(ordinary_type=fixture.AstrMessageEvent))
++        self.assert_stable(text)
++        self.assertIn("MEMBER_AFFECTION", text)
++        self.database.get_recent_bot_responses.assert_awaited_once_with("456", limit=5)
++
++    async def test_owner_private_and_proactive_group_use_stable_style(self):
++        private = self.event(
++            group=False, sender="123", ordinary_type=fixture.AstrMessageEvent
++        )
++        self.assert_stable(await self.run_hook(private))
++        self.assert_stable(await self.run_hook(self.event(sender="")))
++
++    async def test_switch_off_or_integration_off_preserves_existing_style(self):
++        for key in ("natural_chat_enabled", "integrate_plugins"):
++            with self.subTest(key=key):
++                self.bridge.config[key] = False
++                text = await self.run_hook(
++                    self.event(ordinary_type=fixture.AstrMessageEvent)
++                )
++                self.assertIn("RANDOM_STYLE", text)
++                self.assertIn("RANDOM_PATTERN", text)
++                self.bridge.config[key] = True
++
++    async def test_outside_group_and_untrusted_private_keep_existing_style(self):
++        events = [
++            self.event(
++                group=False, sender="999", ordinary_type=fixture.AstrMessageEvent
++            )
++        ]
++        outside = self.event(ordinary_type=fixture.AstrMessageEvent)
++        outside.message_obj.group.group_id = "777"
++        events.append(outside)
++        foreign = self.event(ordinary_type=fixture.AstrMessageEvent)
++        foreign.platform_meta.name = "telegram"
++        events.append(foreign)
++        for event in events:
++            with self.subTest(
++                group=event.get_group_id(), platform=event.get_platform_name()
++            ):
++                self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++
++    async def test_missing_inactive_or_lookalike_bridge_cannot_change_style(self):
++        event = self.event(ordinary_type=fixture.AstrMessageEvent)
++        self.star.activated = False
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.star.activated = True
++        lookalike = type("LocalCodex", (), {"__module__": BRIDGE_NAME + ".main"})()
++        lookalike.config = self.bridge.config
++        self.star.star_cls = lookalike
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.star = None
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++
++    async def test_changing_switch_does_not_reuse_opposite_style_cache(self):
++        event = self.event(ordinary_type=fixture.AstrMessageEvent)
++        self.bridge.config["natural_chat_enabled"] = False
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.bridge.config["natural_chat_enabled"] = True
++        self.assert_stable(await self.run_hook(event))
++        self.bridge.config["natural_chat_enabled"] = False
++        self.assertIn("RANDOM_STYLE", await self.run_hook(event))
++        self.assertEqual(self.database.get_recent_bot_responses.await_count, 2)
++
++    async def test_background_json_learning_keeps_its_own_prompt_and_format(self):
++        adapter_type = importlib.import_module(
++            fixture.SELF_MODULE + ".core.framework_llm_adapter"
++        ).FrameworkLLMAdapter
++        adapter = adapter_type(self.hook._context)
++        provider = SimpleNamespace(
++            meta=lambda: SimpleNamespace(id="local_codex"),
++            text_chat=AsyncMock(
++                return_value=SimpleNamespace(completion_text='{"changes":[]}')
++            ),
++        )
++        adapter.filter_provider = provider
++        result = await adapter.filter_chat_completion(
++            prompt="Analyze fictional preference evidence.",
++            contexts=[],
++            system_prompt="Return only review JSON.",
++            response_format={"type": "json_object"},
++        )
++        self.assertEqual(result, '{"changes":[]}')
++        provider.text_chat.assert_awaited_once_with(
++            prompt="Analyze fictional preference evidence.",
++            contexts=[],
++            system_prompt="Return only review JSON.",
++            response_format={"type": "json_object"},
++        )
++        self.database.get_recent_bot_responses.assert_not_awaited()
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- /dev/null
++++ b/tests/test_bridge_proactive_social.py
+@@ -0,0 +1,190 @@
++"""Keep proactive group context distinct from the last member's relationship.
++
++Run with the AstrBot Python environment and PYTHONPATH pointing at its core.
++SELF_LEARNING_PLUGIN_DIR and PROACTIVE_PLUGIN_DIR can select installed plugins;
++SELF_LEARNING_HOOK_FILE can select a staged handler for pre-deployment checks.
++No model calls, platform sends, or conversation database writes are performed.
++"""
++
++import importlib
++import importlib.util
++import os
++import sys
++import tempfile
++import unittest
++from pathlib import Path
++from types import ModuleType, SimpleNamespace
++from unittest.mock import AsyncMock
++
++RUNTIME = tempfile.TemporaryDirectory(prefix="proactive-social-test-")
++os.environ["ASTRBOT_ROOT"] = RUNTIME.name
++PLUGIN = Path(
++    os.environ.get("SELF_LEARNING_PLUGIN_DIR", Path(__file__).resolve().parents[1])
++)
++PROACTIVE = Path(
++    os.environ.get(
++        "PROACTIVE_PLUGIN_DIR", PLUGIN.parent / "astrbot_plugin_proactive_chat"
++    )
++)
++SELF_MODULE = "data.plugins.astrbot_plugin_self_learning"
++PROACTIVE_MODULE = "data.plugins.astrbot_plugin_proactive_chat"
++for name, directory in ((SELF_MODULE, PLUGIN), (PROACTIVE_MODULE, PROACTIVE)):
++    package = ModuleType(name)
++    package.__path__ = [str(directory)]
++    sys.modules[name] = package
++
++HOOK_MODULE = SELF_MODULE + ".services.hooks.llm_hook_handler"
++if override := os.environ.get("SELF_LEARNING_HOOK_FILE"):
++    spec = importlib.util.spec_from_file_location(HOOK_MODULE, override)
++    hook_module = importlib.util.module_from_spec(spec)
++    sys.modules[HOOK_MODULE] = hook_module
++    spec.loader.exec_module(hook_module)
++else:
++    hook_module = importlib.import_module(HOOK_MODULE)
++
++from astrbot.api.provider import ProviderRequest
++from astrbot.core.platform.astr_message_event import AstrMessageEvent
++from astrbot.core.platform.message_type import MessageType
++from astrbot.core.platform.platform_metadata import PlatformMetadata
++
++SocialContextInjector = importlib.import_module(
++    SELF_MODULE + ".services.social.social_context_injector"
++).SocialContextInjector
++proactive_module = importlib.import_module(PROACTIVE_MODULE + ".core.proactive_event")
++
++
++class ProactiveSocialTests(unittest.IsolatedAsyncioTestCase):
++    def setUp(self):
++        self.config = SimpleNamespace(
++            enable_llm_hooks=True,
++            enable_command_pass_through=True,
++            enable_social_context_injection=True,
++            include_social_relations=True,
++            include_affection_info=True,
++            enable_expression_patterns=True,
++            enable_goal_driven_chat=True,
++        )
++        self.social = SocialContextInjector(
++            database_manager=None,
++            affection_manager=object(),
++            psychological_state_manager=object(),
++            goal_manager=object(),
++        )
++        self.social._enable_protection = False
++        for name, marker in (
++            ("_build_psychological_context", "GROUP_PSYCHOLOGY"),
++            ("_format_expression_patterns_context", "GROUP_EXPRESSIONS"),
++            ("_format_affection_context", "MEMBER_AFFECTION"),
++            ("format_social_context", "MEMBER_RELATIONSHIPS"),
++            ("_build_behavior_guidance", "MEMBER_BEHAVIOR"),
++            ("_format_conversation_goal_context", "MEMBER_GOAL"),
++        ):
++            setattr(self.social, name, AsyncMock(return_value=marker))
++        self.diversity = SimpleNamespace(
++            build_diversity_prompt_injection=AsyncMock(return_value="GROUP_STYLE"),
++            get_current_style=lambda: "default",
++            get_current_pattern=lambda: "chat",
++        )
++        self.hook = hook_module.LLMHookHandler(
++            self.config,
++            self.diversity,
++            self.social,
++            None,
++            None,
++            None,
++            SimpleNamespace(record=lambda value: None),
++            {},
++        )
++
++    def event(self, group=True, sender="999", ordinary_type=None):
++        event = proactive_module.ProactiveMessageEvent(
++            plugin=None,
++            platform_meta=PlatformMetadata(
++                name="aiocqhttp", description="fixture", id="test"
++            ),
++            session_id="test:GroupMessage:456" if group else "test:FriendMessage:999",
++            target_id="456" if group else "999",
++            message_type=MessageType.GROUP_MESSAGE
++            if group
++            else MessageType.FRIEND_MESSAGE,
++            self_id="321",
++            sender_id=sender,
++            sender_name="Fixture member",
++            is_group=group,
++        )
++        if ordinary_type:
++            return ordinary_type(
++                "hello", event.message_obj, event.platform_meta, event.session_id
++            )
++        return event
++
++    async def run_hook(self, event):
++        request = ProviderRequest(prompt="Start a group conversation.")
++        await self.hook.handle(event, request)
++        return "\n".join(
++            part.text
++            for part in request.extra_user_content_parts
++            if hasattr(part, "text")
++        )
++
++    async def test_real_proactive_group_retains_group_context_without_last_member(self):
++        text = await self.run_hook(self.event())
++        for marker in ("GROUP_PSYCHOLOGY", "GROUP_EXPRESSIONS", "GROUP_STYLE"):
++            self.assertIn(marker, text)
++        for name in (
++            "_format_affection_context",
++            "format_social_context",
++            "_build_behavior_guidance",
++            "_format_conversation_goal_context",
++        ):
++            getattr(self.social, name).assert_not_awaited()
++        self.assertNotIn("MEMBER_", text)
++        self.assertEqual(
++            self.social._format_expression_patterns_context.call_args.kwargs["user_id"],
++            "",
++        )
++
++    async def test_real_proactive_group_without_member_hint_has_group_context(self):
++        text = await self.run_hook(self.event(sender=""))
++        self.assertIn("GROUP_PSYCHOLOGY", text)
++        self.assertNotIn("MEMBER_", text)
++
++    async def test_proactive_private_event_retains_real_recipient(self):
++        text = await self.run_hook(self.event(group=False))
++        self.assertIn("MEMBER_AFFECTION", text)
++        self.social._format_affection_context.assert_awaited_once_with("999", "999")
++
++    async def test_ordinary_group_still_uses_current_sender(self):
++        text = await self.run_hook(self.event(ordinary_type=AstrMessageEvent))
++        self.assertIn("MEMBER_RELATIONSHIPS", text)
++        self.social._format_affection_context.assert_awaited_once_with("456", "999")
++
++    async def test_extra_flags_cannot_claim_proactive_identity(self):
++        event = self.event(ordinary_type=AstrMessageEvent)
++        event.set_extra("proactive", True)
++        event.set_extra("plugin_llm_request", True)
++        event._proactive_is_group = True
++        text = await self.run_hook(event)
++        self.assertIn("MEMBER_AFFECTION", text)
++
++    async def test_same_class_name_and_module_are_not_the_registered_event_type(self):
++        spoof = type(
++            "ProactiveMessageEvent",
++            (AstrMessageEvent,),
++            {
++                "__module__": PROACTIVE_MODULE + ".core.proactive_event",
++            },
++        )
++        text = await self.run_hook(self.event(ordinary_type=spoof))
++        self.assertIn("MEMBER_AFFECTION", text)
++
++    async def test_social_switch_still_disables_group_context(self):
++        self.config.enable_social_context_injection = False
++        text = await self.run_hook(self.event())
++        self.assertNotIn("GROUP_PSYCHOLOGY", text)
++        self.social._build_psychological_context.assert_not_awaited()
++        self.assertIn("GROUP_STYLE", text)
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- a/tests/unit/test_config.py
++++ b/tests/unit/test_config.py
+@@ -42,6 +42,7 @@
+         assert config.enable_llm_hooks is False
+         assert config.enable_web_interface is True
+         assert config.enable_webui_password is False
++        assert config.require_affection_approval is False
+         assert config.webui_initial_password == ""
+         assert config.web_interface_port == 7833
+         assert config.web_interface_host == "127.0.0.1"
+@@ -61,6 +62,13 @@
+         assert config.expression_learning_min_interval_seconds == 3600
+         assert config.topic_detection_interval_messages == 10
+         assert config.context_injection_position == "end"
++
++    def test_legacy_learning_approval_does_not_enable_affection_review(self):
++        config = PluginConfig.create_from_config({
++            "Advanced_Settings": {"require_learning_approval": True},
++        })
++        assert config.require_learning_approval is True
++        assert config.require_affection_approval is False
+ 
+     def test_default_learning_parameters(self):
+         """Test default learning parameter values."""
+--- a/tests/unit/test_config_service.py
++++ b/tests/unit/test_config_service.py
+@@ -832,6 +832,32 @@
+         assert container.astrbot_config["Advanced_Settings"]["log_level"] == "debug"
+ 
+     @pytest.mark.asyncio
++    async def test_affection_approval_saves_independently_and_survives_reload(self, tmp_path):
++        container = build_container(tmp_path)
++        container.plugin_config.require_learning_approval = True
++        container.astrbot_config["Advanced_Settings"] = {"require_learning_approval": True}
++        container.astrbot_config.config_path = tmp_path / "plugin.json"
++        service = ConfigService(container)
++        schema = await service.get_config_schema()
++        group = next(item for item in schema["groups"] if item["key"] == "Affection_System_Settings")
++        field = next(item for item in group["fields"] if item["key"] == "require_affection_approval")
++        assert field["default"] is False
++        assert field["value"] is False
++        for enabled in (True, False):
++            success, message, updated = await service.update_config({
++                "Affection_System_Settings": {"require_affection_approval": enabled},
++            })
++            assert success, message
++            assert updated["require_affection_approval"] is enabled
++            assert container.plugin_config.require_affection_approval is enabled
++            stored = json.loads(container.astrbot_config.config_path.read_text(encoding="utf-8"))
++            assert stored["Affection_System_Settings"]["require_affection_approval"] is enabled
++            assert stored["Advanced_Settings"]["require_learning_approval"] is True
++            reloaded = PluginConfig.create_from_config(stored)
++            assert reloaded.require_affection_approval is enabled
++            assert reloaded.require_learning_approval is True
++
++    @pytest.mark.asyncio
+     async def test_update_config_accepts_empty_astrbot_config_source(self, tmp_path):
+         container = build_container(tmp_path)
+         container.astrbot_config = SaveableConfig({})
+--- a/tests/unit/test_forgetting_manager.py
++++ b/tests/unit/test_forgetting_manager.py
+@@ -129,6 +129,26 @@
+     return ForgettingManager(config=_config(**config_overrides), database_manager=db), db
+ 
+ 
++def test_approval_mode_blocks_automatic_and_manual_batch_cycles_before_database_access():
++    session = _FakeSession([])
++    manager, db = _make_manager(session, require_learning_approval=True)
++    assert manager.enabled is False
++    assert asyncio.run(manager.start()) is False
++    result = asyncio.run(manager.run_cycle())
++    assert "审批" in result["skipped"]
++    assert db.borrowed == 0
++    assert session.statements == []
++
++
++def test_approval_mode_still_allows_owner_confirmed_individual_deletion():
++    session = _FakeSession([])
++    manager, db = _make_manager(session, require_learning_approval=True)
++    result = asyncio.run(manager.delete_now("expression", 5))
++    assert result["success"] is True
++    assert db.borrowed == 1
++    assert session.commits == 1
++
++
+ def test_cycle_advances_resets_and_deletes_expressions():
+     session = _FakeSession([
+         _FakeResult([  # 表达列表
+--- /dev/null
++++ b/tests/unit/test_learning_approval_gate.py
+@@ -0,0 +1,367 @@
++"""Exercise approval gates against isolated SQLite databases, never live data."""
++
++import asyncio
++import json
++import tempfile
++import time
++import unittest
++from types import SimpleNamespace
++from unittest.mock import AsyncMock, Mock, patch
++
++from sqlalchemy import select
++
++from self_learning_EterU.config import PluginConfig
++from self_learning_EterU.models.orm.affection import AffectionInteraction, AffectionReview, UserAffection
++from self_learning_EterU.models.orm.expression import ExpressionPattern
++from self_learning_EterU.models.orm.jargon import Jargon
++from self_learning_EterU.models.orm.learning import StyleLearningReview
++from self_learning_EterU.services.database.sqlalchemy_database_manager import SQLAlchemyDatabaseManager
++from self_learning_EterU.services.learning.affection_review import AffectionReviewService
++from self_learning_EterU.services.learning.approval_baseline import prepare_approval_baseline
++from self_learning_EterU.services.learning.expression_learning import ExpressionLearningModule
++from self_learning_EterU.services.learning.expression_review import queue_patterns
++from self_learning_EterU.services.learning.persona_learning import PersonaLearningModule
++from self_learning_EterU.services.learning.remember_service import RememberService
++from self_learning_EterU.services.state.affection_manager import AffectionManager, InteractionType
++from self_learning_EterU.services.persona.temporary_persona_updater import TemporaryPersonaUpdater
++
++
++class ApprovalGateTests(unittest.IsolatedAsyncioTestCase):
++    async def asyncSetUp(self):
++        self.temp = tempfile.TemporaryDirectory()
++        self.config = PluginConfig(data_dir=self.temp.name, db_type="sqlite", enable_web_interface=False)
++        self.db = SQLAlchemyDatabaseManager(self.config)
++        self.assertTrue(await self.db.start())
++        self.config.require_learning_approval = True
++        self.config.require_affection_approval = True
++        self.affection = AffectionReviewService(self.db, self.config)
++
++    async def asyncTearDown(self):
++        await self.db.stop()
++        self.temp.cleanup()
++
++    async def count(self, model):
++        async with self.db.get_session() as session:
++            return len((await session.scalars(select(model))).all())
++
++    async def proposal(self, user="123", before=0, after=5):
++        return await self.affection.propose("group-a", user, before, after, "praise", "友善互动", "辛苦啦", "calm")
++
++    async def test_affection_waits_for_approval_and_records_actual_change(self):
++        review_id = await self.proposal()
++        self.assertIsNone(await self.db.get_user_affection("group-a", "123"))
++        self.assertEqual(await self.count(AffectionInteraction), 0)
++        self.assertTrue((await self.affection.decide(review_id, "approve"))[0])
++        self.assertEqual((await self.db.get_user_affection("group-a", "123"))["affection_level"], 5)
++        history = await self.db.get_affection_history("group-a", "123")
++        self.assertEqual((history[0]["previous_level"], history[0]["new_level"]), (0, 5))
++        self.assertEqual(history[0]["message"], "辛苦啦")
++        self.assertEqual(await self.db.get_affection_history("group-b"), [])
++        self.assertFalse((await self.affection.decide(review_id, "approve"))[0])
++        self.assertEqual(await self.count(AffectionInteraction), 1)
++
++    async def test_rejection_and_duplicate_and_zero_changes(self):
++        first = await self.proposal()
++        self.assertEqual(first, await self.proposal())
++        self.assertEqual(await self.proposal(after=0), 0)
++        self.assertTrue((await self.affection.decide(first, "reject"))[0])
++        self.assertEqual(await self.count(UserAffection), 0)
++        self.assertEqual(await self.count(AffectionInteraction), 0)
++
++    async def test_unified_affection_approval_updates_the_active_scope(self):
++        self.config.affection_scope = "per_user"
++        review_id = await self.proposal()
++        self.assertTrue((await self.affection.decide(review_id, "approve"))[0])
++        for group in ("group-a", "group-b"):
++            self.assertEqual((await self.db.get_user_affection(group, "123"))["affection_level"], 5)
++            self.assertEqual((await self.db.get_affection_history(group, "123"))[0]["new_level"], 5)
++
++    async def test_changing_affection_scope_invalidates_old_pending_suggestions(self):
++        review_id = await self.proposal()
++        self.config.affection_scope = "per_user"
++        self.assertEqual(await self.affection.list_reviews("pending"), [])
++        stale = await self.affection.list_reviews("stale")
++        self.assertEqual(stale[0]["id"], review_id)
++        self.assertFalse((await self.affection.decide(review_id, "approve"))[0])
++        self.assertIsNone(await self.db.get_user_affection("group-a", "123"))
++        self.assertTrue((await self.affection.decide(review_id, "reject"))[0])
++
++    async def test_message_interaction_queues_without_changing_mood_or_other_members(self):
++        manager = AffectionManager.__new__(AffectionManager)
++        manager._affection_lock = asyncio.Lock()
++        manager.config = self.config
++        manager.db_manager = self.db
++        manager._logger = Mock()
++        manager.get_current_mood = AsyncMock(return_value=None)
++        manager._calculate_affection_change = Mock(return_value={
++            "can_change": True, "change": 5, "reason": "友善互动",
++        })
++        manager._handle_mood_response = AsyncMock()
++        manager._redistribute_affection = AsyncMock()
++        result = await manager.update_affection("group-a", "123", InteractionType.THANKS, "辛苦啦")
++        self.assertTrue(result["pending_review"])
++        self.assertEqual(result["change"], 0)
++        self.assertIsNone(await self.db.get_user_affection("group-a", "123"))
++        manager._handle_mood_response.assert_not_awaited()
++        manager._redistribute_affection.assert_not_awaited()
++        self.assertEqual((await self.affection.list_reviews())[0]["message"], "辛苦啦")
++
++    async def test_affection_http_decisions_and_remote_access(self):
++        from self_learning_EterU.webui.compat import Quart
++        from self_learning_EterU.webui.blueprints import persona_reviews
++        from self_learning_EterU.webui.middleware import auth
++
++        app = Quart("approval-gate-tests")
++        app.register_blueprint(persona_reviews.persona_reviews_bp)
++        container = SimpleNamespace(database_manager=self.db, plugin_config=self.config)
++        review_id = await self.proposal()
++        endpoint = f"/api/affection_reviews/{review_id}/review"
++        with patch.object(persona_reviews, "get_container", return_value=container), \
++             patch.object(auth, "get_container", return_value=container):
++            remote = app.test_client(client=("198.51.100.10", 50000))
++            self.assertEqual((await remote.post(endpoint, json={"action": "approve"})).status_code, 403)
++            self.assertIsNone(await self.db.get_user_affection("group-a", "123"))
++            client = app.test_client(client=("127.0.0.1", 50000))
++            for learning, affection in ((True, False), (False, True), (True, True), (False, False)):
++                self.config.require_learning_approval = learning
++                self.config.require_affection_approval = affection
++                status = await (await client.get("/api/learning_approval_status")).get_json()
++                self.assertEqual(status["require_approval"], learning)
++                self.assertEqual(status["require_affection_approval"], affection)
++            self.assertEqual((await client.post(endpoint, json={"action": "invalid"})).status_code, 400)
++            self.assertEqual((await client.post(endpoint, json={"action": "approve"})).status_code, 200)
++            self.assertEqual((await client.post(endpoint, json={"action": "approve"})).status_code, 409)
++            rejected_id = await self.proposal(user="456")
++            response = await client.post(f"/api/affection_reviews/{rejected_id}/review", json={"action": "reject"})
++            self.assertEqual(response.status_code, 200)
++            self.assertIsNone(await self.db.get_user_affection("group-a", "456"))
++
++    async def test_affection_rises_and_falls_follow_only_the_independent_switch(self):
++        manager = AffectionManager.__new__(AffectionManager)
++        manager._affection_lock = asyncio.Lock()
++        manager.config = self.config
++        manager.db_manager = self.db
++        manager._logger = Mock()
++        manager.get_current_mood = AsyncMock(return_value=None)
++        manager._handle_mood_response = AsyncMock()
++        manager._redistribute_affection = AsyncMock()
++        for learning in (True, False):
++            for affection in (False, True):
++                self.config.require_learning_approval = learning
++                self.config.require_affection_approval = affection
++                for delta in (5, -3):
++                    with self.subTest(learning=learning, affection=affection, delta=delta):
++                        user = f"member-{learning}-{affection}-{delta}"
++                        await self.db.update_user_affection("group-a", user, 20)
++                        manager._calculate_affection_change = Mock(return_value={
++                            "can_change": True, "change": delta, "reason": "test interaction",
++                        })
++                        result = await manager.update_affection(
++                            "group-a", user, InteractionType.CHAT, "new interaction",
++                        )
++                        self.assertTrue(result["success"])
++                        self.assertEqual(bool(result.get("pending_review")), affection)
++                        level = (await self.db.get_user_affection("group-a", user))["affection_level"]
++                        self.assertEqual(level, 20 if affection else 20 + delta)
++                        reviews = [row for row in await self.affection.list_reviews() if row["user_id"] == user]
++                        self.assertEqual(len(reviews), int(affection))
++                        history = [row for row in await self.db.get_affection_history("group-a", user)
++                                   if row["message"] == "new interaction"]
++                        self.assertEqual(len(history), int(not affection))
++                        if history:
++                            self.assertEqual((history[0]["previous_level"], history[0]["new_level"]), (20, 20 + delta))
++
++    async def test_disabling_affection_review_preserves_old_queue_without_replaying_it(self):
++        review_id = await self.proposal(after=5)
++        self.config.require_affection_approval = False
++        manager = AffectionManager.__new__(AffectionManager)
++        manager._affection_lock = asyncio.Lock()
++        manager.config = self.config
++        manager.db_manager = self.db
++        manager._logger = Mock()
++        manager.get_current_mood = AsyncMock(return_value=None)
++        manager._calculate_affection_change = Mock(return_value={
++            "can_change": True, "change": 2, "reason": "new interaction",
++        })
++        manager._handle_mood_response = AsyncMock()
++        result = await manager.update_affection("group-a", "123", InteractionType.CHAT, "new interaction")
++        self.assertEqual(result["new_level"], 2)
++        self.assertEqual(await self.count(AffectionReview), 1)
++        rows = await self.affection.list_reviews("all")
++        self.assertEqual(rows[0]["id"], review_id)
++        self.assertEqual(rows[0]["stored_status"], "pending")
++        self.assertEqual(rows[0]["status"], "stale")
++
++    async def test_mood_personality_changes_are_queued_before_persistence(self):
++        updater = TemporaryPersonaUpdater.__new__(TemporaryPersonaUpdater)
++        updater.config = self.config
++        updater.db_manager = self.db
++        updater._get_framework_persona = AsyncMock(return_value={"prompt": "原人格"})
++        updater.persona_manager_updater = Mock()
++        updater._append_to_persona_updates_file = AsyncMock()
++        updater._apply_mood_update_to_system_prompt = AsyncMock()
++        self.assertTrue(await updater.apply_mood_based_persona_update("group-a", "calm", "平静"))
++        updater.persona_manager_updater.is_available.assert_not_called()
++        updater._append_to_persona_updates_file.assert_not_awaited()
++        updater._apply_mood_update_to_system_prompt.assert_not_awaited()
++        reviews = await self.db.get_pending_persona_learning_reviews()
++        self.assertEqual(len(reviews), 1)
++        self.assertIn("平静", reviews[0]["proposed_content"])
++
++    async def test_stale_affection_and_total_cap_do_not_modify_anyone(self):
++        review_id = await self.proposal()
++        await self.db.update_user_affection("group-a", "123", 1)
++        self.assertFalse((await self.affection.decide(review_id, "approve"))[0])
++        self.assertEqual(await self.affection.list_reviews(), [])
++        self.assertEqual((await self.affection.list_reviews("stale"))[0]["status"], "stale")
++        review_id = await self.proposal(user="456")
++        self.config.max_total_affection = 1
++        self.assertFalse((await self.affection.decide(review_id, "approve"))[0])
++        self.assertIsNone(await self.db.get_user_affection("group-a", "456"))
++
++    async def test_stale_classification_preserves_evidence_and_does_not_expire_by_age(self):
++        stale_id = await self.proposal(after=7)
++        approved_id = await self.proposal(after=5)
++        valid_id = await self.proposal(user="456")
++        async with self.db.get_session() as session:
++            valid = await session.get(AffectionReview, valid_id)
++            valid.created_at = 1
++            await session.commit()
++        self.assertTrue((await self.affection.decide(approved_id, "approve"))[0])
++        self.assertEqual([row["id"] for row in await self.affection.list_reviews()], [valid_id])
++        stale = await self.affection.list_reviews("stale")
++        self.assertEqual([row["id"] for row in stale], [stale_id])
++        self.assertEqual(stale[0]["current_level"], 5)
++        self.assertTrue(stale[0]["stale_reason"])
++        self.assertEqual(len(await self.affection.list_reviews("all")), 3)
++        async with self.db.get_session() as session:
++            record = await session.get(AffectionReview, stale_id)
++            self.assertEqual(record.status, "pending")
++            self.assertEqual(record.message, "辛苦啦")
++
++    async def test_embedded_and_standalone_queues_share_decisions(self):
++        from self_learning_EterU.core.page_api import PluginPageApi
++        from self_learning_EterU.webui.compat import Quart
++        from self_learning_EterU.webui.blueprints import persona_reviews
++        from self_learning_EterU.webui.middleware import auth
++
++        container = SimpleNamespace(database_manager=self.db, plugin_config=self.config)
++        persona = SimpleNamespace(
++            get_pending_persona_updates=AsyncMock(return_value={"updates": [], "total": 2}),
++            get_reviewed_persona_updates=AsyncMock(return_value={"updates": [], "total": 0}),
++        )
++        learning = SimpleNamespace(get_style_learning_reviews=AsyncMock(
++            return_value={"reviews": [], "total": 2}))
++        api = PluginPageApi(SimpleNamespace())
++        api._container = lambda: container
++        api._imports = lambda: SimpleNamespace(
++            PersonaReviewService=lambda _: persona, LearningService=lambda _: learning,
++            JargonService=lambda _: object(),
++        )
++        api._load_pending_jargon_reviews = AsyncMock(return_value={"jargon_list": [], "total": 0})
++        first = await self.proposal(after=5)
++        stale = await self.proposal(after=7)
++        second = await self.proposal(user="456")
++        app = Quart("queue-sync-tests")
++        app.register_blueprint(persona_reviews.persona_reviews_bp)
++        with patch.object(persona_reviews, "get_container", return_value=container), \
++             patch.object(auth, "get_container", return_value=container):
++            client = app.test_client(client=("127.0.0.1", 50000))
++            before = await api._load_reviews(limit=0)
++            self.assertEqual(before["approval_settings"], {
++                "require_approval": True, "require_affection_approval": True,
++            })
++            self.assertEqual(persona.get_pending_persona_updates.await_args.kwargs["limit"], 0)
++            self.assertEqual(learning.get_style_learning_reviews.await_args.kwargs["limit"], 0)
++            self.assertEqual(persona.get_reviewed_persona_updates.await_args.args[0], 50)
++            self.assertEqual(before["pending_total"], 5)
++            api._body = AsyncMock(return_value={"action": "affection_review", "id": first})
++            self.assertFalse((await api.post_reviews_action())["data"]["success"])
++            api._body = AsyncMock(return_value={"action": "affection_review", "id": first, "decision": "approve"})
++            self.assertTrue((await api.post_reviews_action())["data"]["success"])
++            web = await (await client.get("/api/affection_reviews?status=all")).get_json()
++            native = await api._load_reviews()
++            self.assertEqual(web["reviews"], native["affection_reviews"]["reviews"])
++            self.assertEqual(native["pending_total"], 3)
++            self.assertEqual(next(row for row in web["reviews"] if row["id"] == stale)["status"], "stale")
++            response = await client.post(f"/api/affection_reviews/{second}/review", json={"action": "reject"})
++            self.assertEqual(response.status_code, 200)
++            native = await api._load_reviews()
++            self.assertEqual(native["pending_total"], 2)
++            self.assertEqual(next(row for row in native["affection_reviews"]["reviews"] if row["id"] == second)["status"], "rejected")
++
++    async def test_approval_transaction_rolls_back_on_history_failure(self):
++        review_id = await self.proposal()
++        with patch("self_learning_EterU.services.learning.affection_review.AffectionInteraction", side_effect=RuntimeError("disk")):
++            with self.assertRaises(RuntimeError):
++                await self.affection.decide(review_id, "approve")
++        self.assertIsNone(await self.db.get_user_affection("group-a", "123"))
++        self.assertEqual((await self.affection.list_reviews())[0]["status"], "pending")
++
++    async def test_all_expression_samples_wait_then_keep_scope(self):
++        patterns = [{"situation": f"今天发生什么{i}", "expression": f"一起看看吧{i}", "user_id": "123"} for i in range(23)]
++        self.assertEqual(await queue_patterns(self.db, "group-a", patterns, "persona-a"), 23)
++        self.assertEqual(await self.count(ExpressionPattern), 0)
++        self.assertEqual(await self.count(StyleLearningReview), 3)
++        self.assertEqual(await queue_patterns(self.db, "group-a", patterns, "persona-a"), 0)
++        pending = await self.db.get_pending_style_reviews()
++        accepted = pending[0]["id"]
++        rejected = pending[1]["id"]
++        self.assertTrue(await self.db.update_style_review_status(accepted, "approved"))
++        self.assertTrue(await self.db.update_style_review_status(rejected, "rejected"))
++        async with self.db.get_session() as session:
++            active = (await session.scalars(select(ExpressionPattern))).all()
++            self.assertGreater(len(active), 0)
++            self.assertLess(len(active), 23)
++            self.assertTrue(all(p.group_id == "group-a" and p.persona_id == "persona-a" and p.user_id == "123" for p in active))
++        count = len(active)
++        await self.db.update_style_review_status(accepted, "approved")
++        self.assertEqual(await self.count(ExpressionPattern), count)
++        self.assertEqual(await queue_patterns(self.db, "group-a", patterns, "persona-a"), 0)
++
++    async def test_batch_and_remember_do_not_activate_samples(self):
++        await ExpressionLearningModule(self.db).save_style_learning_record(
++            "group-a", {"expression_patterns": [{"situation": "今天累吗", "expression": "有一点，先歇会"}]}, []
++        )
++        self.assertEqual(await self.count(ExpressionPattern), 0)
++        result = await RememberService(self.db).remember(
++            group_id="group-a", sender_id="123", content="你好呀 => 来啦，一起坐会", persona_id="persona-a",
++        )
++        self.assertFalse(result.expression_saved)
++        self.assertEqual(result.memory_id, 0)
++        self.assertEqual(await self.count(StyleLearningReview), 2)
++
++    async def test_persona_candidate_is_not_applied_before_review(self):
++        module = PersonaLearningModule.__new__(PersonaLearningModule)
++        module.config = self.config
++        module.persona_manager = SimpleNamespace(update_persona=AsyncMock())
++        module.create_persona_review = AsyncMock(return_value=1)
++        result = await module.apply_persona_learning(
++            "group-a", {"enhanced_prompt": "说话利落"}, [],
++            current_persona={"prompt": "原人格"}, updated_persona={"prompt": "原人格\n说话利落"},
++        )
++        self.assertTrue(result)
++        module.persona_manager.update_persona.assert_not_awaited()
++        module.create_persona_review.assert_awaited_once()
++
++    async def test_legacy_quarantine_preserves_approved_and_runs_once(self):
++        now = time.time()
++        async with self.db.get_session() as session:
++            session.add_all([
++                ExpressionPattern(group_id="group-a", persona_id="default", situation="未审样例", expression="不应先用", weight=1, last_active_time=now, create_time=now),
++                ExpressionPattern(group_id="group-a", persona_id="default", situation="已审样例", expression="可以使用", weight=1, last_active_time=now, create_time=now),
++                StyleLearningReview(type="style_learning", group_id="group-a", timestamp=now, status="approved", learned_patterns=json.dumps([{"situation": "已审样例", "expression": "可以使用"}]), few_shots_content=""),
++                Jargon(content="候选词", chat_id="group-a", raw_content="[]", meaning="待审含义", is_jargon=True, is_complete=False, count=1, created_at=now, updated_at=now),
++            ])
++            await session.commit()
++        await prepare_approval_baseline(self.db)
++        self.assertEqual(await self.count(ExpressionPattern), 1)
++        self.assertEqual(len(await self.db.get_pending_style_reviews()), 1)
++        async with self.db.get_session() as session:
++            self.assertFalse((await session.scalar(select(Jargon))).is_jargon)
++        await prepare_approval_baseline(self.db)
++        self.assertEqual(len(await self.db.get_pending_style_reviews()), 1)
++
++
++if __name__ == "__main__":
++    unittest.main()
+--- /dev/null
++++ b/web_src/src/components/business/LearningApprovalPanel.test.tsx
+@@ -0,0 +1,77 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
++import { afterEach, beforeEach, expect, it, vi } from 'vitest';
++import { LearningApprovalPanel } from './LearningApprovalPanel';
++
++const mocks = vi.hoisted(() => ({ get: vi.fn(), post: vi.fn(), confirm: vi.fn(), toast: vi.fn(), refresh: vi.fn() }));
++vi.mock('../../services/api', () => ({ api: { get: mocks.get, post: mocks.post } }));
++vi.mock('../../stores/dashboard', () => ({ useDashboard: () => ({
++  lastUpdated: () => null, confirm: mocks.confirm, toast: mocks.toast, refresh: mocks.refresh,
++}) }));
++
++afterEach(cleanup);
++
++beforeEach(() => {
++  vi.clearAllMocks();
++  mocks.confirm.mockResolvedValue(true);
++  mocks.post.mockResolvedValue({ success: true });
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: true, require_affection_approval: false, learning_interval_hours: 6, min_messages: 50, groups: [] }
++    : { reviews: [{ id: 7, user_id: '123', group_id: '456', before: 10, after: 15,
++      change: 5, reason: '友善互动', message: '辛苦啦', status: 'pending', created_at: 1700000000 }] });
++});
++
++it('shows evidence and sends an explicit approval for the selected change', async () => {
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText('辛苦啦');
++  expect(screen.getByText(/学习内容审批：已开启/)).toBeInTheDocument();
++  expect(screen.getByText(/好感度审批：已关闭，新的变化直接生效/)).toBeInTheDocument();
++  expect(mocks.post).not.toHaveBeenCalled();
++  fireEvent.click(screen.getByText('通过'));
++  await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/affection_reviews/7/review', { action: 'approve' }));
++  await waitFor(() => expect(mocks.refresh).toHaveBeenCalledWith(true));
++});
++
++it('keeps stale evidence in history without offering approval', async () => {
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: true, groups: [] }
++    : { reviews: [{ id: 8, user_id: '123', group_id: '456', before: 10, after: 15,
++      change: 5, reason: 'Earlier proposal', message: 'Evidence retained',
++      status: 'stale', stale_reason: 'Current value changed', created_at: 1 }] });
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText(/失效 1/);
++  expect(screen.queryByText('Evidence retained')).not.toBeInTheDocument();
++  fireEvent.click(screen.getByText('显示处理历史与失效建议'));
++  await screen.findByText('Evidence retained');
++  expect(screen.getByText('Current value changed')).toBeInTheDocument();
++  expect(screen.queryByText('通过')).not.toBeInTheDocument();
++  expect(mocks.post).not.toHaveBeenCalled();
++});
++
++it('does not apply a change if the owner cancels confirmation', async () => {
++  mocks.confirm.mockResolvedValue(false);
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText('辛苦啦');
++  fireEvent.click(screen.getByText('通过'));
++  await waitFor(() => expect(mocks.confirm).toHaveBeenCalled());
++  expect(mocks.post).not.toHaveBeenCalled();
++});
++
++it('shows affection approval enabled independently of the learning-content gate', async () => {
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: false, require_affection_approval: true, groups: [] }
++    : { reviews: [] });
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText('好感度审批：已开启，新的变化须批准后生效。');
++  expect(screen.getByText('学习内容审批：未开启强制审批。')).toBeInTheDocument();
++  expect(mocks.post).not.toHaveBeenCalled();
++});
++
++it('does not claim automatic changes before the backend provides the separate setting', async () => {
++  mocks.get.mockImplementation(async (path: string) => path.includes('learning_approval_status')
++    ? { require_approval: true, groups: [] }
++    : { reviews: [] });
++  render(() => <LearningApprovalPanel />);
++  await screen.findByText(/学习内容审批：已开启/);
++  expect(screen.getByText('好感度审批：状态暂不可用。')).toBeInTheDocument();
++  expect(screen.queryByText(/新的变化直接生效/)).not.toBeInTheDocument();
++});
+--- /dev/null
++++ b/web_src/src/components/business/LearningApprovalPanel.tsx
+@@ -0,0 +1,90 @@
++import { createEffect, createSignal, For, Show } from 'solid-js';
++import { api } from '../../services/api';
++import { useDashboard } from '../../stores/dashboard';
++import { list } from '../../pages/shared';
++import { formatTime } from '../../lib/format';
++import { Button, Card, EmptyState, Panel } from '../ui';
++
++type Change = {
++  id: number; group_id: string; user_id: string; before: number; after: number;
++  change: number; reason: string; message: string; status: string; created_at: number;
++  stale_reason?: string; current_level?: number;
++};
++type Status = { require_approval?: boolean; require_affection_approval?: boolean; learning_interval_hours?: number; min_messages?: number; groups?: string[] };
++
++export function LearningApprovalPanel() {
++  const dashboard = useDashboard();
++  const [status, setStatus] = createSignal<Status>({});
++  const [rows, setRows] = createSignal<Change[]>([]);
++  const [group, setGroup] = createSignal('');
++  const [metrics, setMetrics] = createSignal<Record<string, unknown>>({});
++  const [showHistory, setShowHistory] = createSignal(false);
++  const [busy, setBusy] = createSignal(false);
++  let loadToken = 0;
++  const loadMetrics = async (value: string) => {
++    if (value) setMetrics(await api.get(`/api/affection_metrics?${new URLSearchParams({ group_id: value })}`));
++  };
++  const load = async () => {
++    const token = ++loadToken;
++    try {
++      const [state, result] = await Promise.all([
++        api.get<Status>('/api/learning_approval_status'),
++        api.get<{ reviews: Change[] }>('/api/affection_reviews?status=all'),
++      ]);
++      if (token !== loadToken) return;
++      setStatus(state); setRows(result.reviews || []);
++      const selected = group() || state.groups?.[0] || '';
++      setGroup(selected); await loadMetrics(selected);
++    } catch (error) {
++      dashboard.toast(error instanceof Error ? error.message : '学习审批状态加载失败', 'danger');
++    }
++  };
++  createEffect(() => { dashboard.lastUpdated(); void load(); });
++  const decide = async (item: Change, action: 'approve' | 'reject') => {
++    if (!await dashboard.confirm({
++      title: action === 'approve' ? '批准好感度变化' : '驳回好感度建议',
++      message: `${item.user_id}：${item.before} → ${item.after}。${item.reason}`,
++    })) return;
++    setBusy(true);
++    try {
++      await api.post(`/api/affection_reviews/${item.id}/review`, { action });
++      dashboard.toast(action === 'approve' ? '好感度已更新' : '已驳回，数值未变', 'success');
++    } catch (error) {
++      dashboard.toast(error instanceof Error ? error.message : '操作失败', 'danger');
++    } finally { await load(); await dashboard.refresh(true); setBusy(false); }
++  };
++  return <>
++    <Panel title="学习审批状态" actions={<Button onClick={load}>刷新</Button>}>
++      <p>{status().require_approval === undefined ? '学习内容审批：状态暂不可用。' : status().require_approval ? '学习内容审批：已开启，表达、人格、黑话等内容先审批。' : '学习内容审批：未开启强制审批。'}</p>
++      <p>{status().require_affection_approval === undefined ? '好感度审批：状态暂不可用。' : status().require_affection_approval ? '好感度审批：已开启，新的变化须批准后生效。' : '好感度审批：已关闭，新的变化直接生效。已有待审记录保留，不会自动批准或追补。'}</p>
++      <p>两个开关互相独立；可在设置中的“高级设置”和“好感度系统设置”分别调整。</p>
++      <p>批次学习间隔 {status().learning_interval_hours ?? '--'} 小时，至少 {status().min_messages ?? '--'} 条消息。没有新建议也可能是未到阈值或没有足够证据。</p>
++      <p>好感度为 0 的变化不会生成审批；原数值或上限已变化的建议单独显示，不计入待处理。不会仅因时间久而丢弃建议。</p>
++    </Panel>
++    <Panel title={`好感度审批（待处理 ${rows().filter(row => row.status === 'pending').length} · 失效 ${rows().filter(row => row.status === 'stale').length}）`}
++      actions={<Button onClick={() => setShowHistory(!showHistory())}>{showHistory() ? '只看待处理' : '显示处理历史与失效建议'}</Button>}>
++      <For each={rows().filter(row => showHistory() || row.status === 'pending')} fallback={<EmptyState title="暂无好感度建议" />}>
++        {row => <Card>
++          <strong>QQ {row.user_id}：{row.before} → {row.after}（{row.change > 0 ? '+' : ''}{row.change}）</strong>
++          <p>群／会话 {row.group_id} · {formatTime(row.created_at)} · {row.status}</p>
++          <p>{row.reason}</p><blockquote>{row.message}</blockquote>
++          <Show when={row.stale_reason}><p>{row.stale_reason}</p></Show>
++          <Show when={row.status === 'pending'}><div class="inline-actions">
++            <Button disabled={busy()} tone="success" onClick={() => decide(row, 'approve')}>通过</Button>
++            <Button disabled={busy()} tone="warning" onClick={() => decide(row, 'reject')}>驳回</Button>
++          </div></Show>
++        </Card>}
++      </For>
++    </Panel>
++    <Panel title="当前好感度与实际变化记录">
++      <label>群／会话 <select value={group()} onChange={event => {
++        const selected = event.currentTarget.value; setGroup(selected);
++        void loadMetrics(selected).catch(error => dashboard.toast(String(error), 'danger'));
++      }}><For each={status().groups || []}>{id => <option value={id}>{id}</option>}</For></select></label>
++      <p><For each={list<Record<string, unknown>>(metrics().users)}>{row => <span>QQ {String(row.user_id)}：{String(row.affection_level)}　</span>}</For></p>
++      <For each={list<Record<string, unknown>>(metrics().history)} fallback={<EmptyState title="暂无变化明细（旧版本未记录的明细无法补造）" />}>
++        {row => <p>{formatTime(row.timestamp)} · QQ {String(row.user_id)}：{String(row.previous_level)} → {String(row.new_level)} · {String(row.reason || '')}</p>}
++      </For>
++    </Panel>
++  </>;
++}
+--- a/web_src/src/components/business/ReviewCard.module.scss
++++ b/web_src/src/components/business/ReviewCard.module.scss
+@@ -3,6 +3,30 @@
+ .review-card {
+   display: grid;
+   gap: 12px;
++
++  label {
++    display: grid;
++    gap: 6px;
++  }
++
++  textarea, select {
++    width: 100%;
++    box-sizing: border-box;
++    padding: 8px;
++    border: 1px solid var(--border);
++    border-radius: 8px;
++    color: inherit;
++    background: transparent;
++    font: inherit;
++  }
++
++  blockquote {
++    margin: 8px 0;
++    padding-left: 10px;
++    border-left: 2px solid var(--border);
++    overflow-wrap: anywhere;
++    white-space: pre-wrap;
++  }
+ 
+   p {
+     margin: 0;
+--- /dev/null
++++ b/web_src/src/components/business/ReviewCard.test.tsx
+@@ -0,0 +1,54 @@
++import { cleanup, fireEvent, render, screen, waitFor } from '@solidjs/testing-library';
++import { afterEach, describe, expect, it, vi } from 'vitest';
++import { ReviewCard } from './ReviewCard';
++
++const mocks = vi.hoisted(() => ({
++  post: vi.fn().mockResolvedValue({ success: true }),
++  confirm: vi.fn().mockResolvedValue(true),
++  refresh: vi.fn().mockResolvedValue(undefined),
++  toast: vi.fn(),
++}));
++vi.mock('../../services/api', () => ({ api: { post: mocks.post } }));
++vi.mock('../../stores/dashboard', () => ({ useDashboard: () => mocks }));
++
++afterEach(() => { cleanup(); vi.clearAllMocks(); });
++
++const item = {
++  id: 'qq_profile_test', review_source: 'qq_profile', title: 'Beta · 日常语气',
++  status: 'pending', before: '沿用人格', after: '温柔耐心', field_type: 'string',
++  field_options: ['沿用人格', '温柔耐心', '简洁直接'], field_label: '日常语气',
++  evidence: [{ text: '以后直说就好。<script>bad()</script>', timestamp: 1 }],
++};
++
++describe('personal profile review', () => {
++  it('shows a revert action for history without allowing another approval', async () => {
++    render(() => <ReviewCard item={{ ...item, status: 'approved' }} kind="persona" />);
++    expect(screen.queryByLabelText('审批后的值')).toBeNull();
++    expect(screen.queryByRole('button', { name: /通过/ })).toBeNull();
++    await fireEvent.click(screen.getByRole('button', { name: '撤回' }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/qq_profile_test/revert', {}));
++  });
++
++  it('shows literal evidence and submits the administrator edited option', async () => {
++    const { container } = render(() => <ReviewCard item={item} kind="persona" />);
++    expect(screen.getByText('以后直说就好。<script>bad()</script>')).toBeInTheDocument();
++    expect(container.querySelector('script')).toBeNull();
++    await fireEvent.change(screen.getByLabelText('审批后的值'), { target: { value: '简洁直接' } });
++    await fireEvent.click(screen.getByRole('button', { name: /通过/ }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/qq_profile_test/review', { action: 'approve', modified_content: '简洁直接' }));
++  });
++
++  it('does not send edited values when rejecting a suggestion', async () => {
++    render(() => <ReviewCard item={{ ...item, field_type: 'list', field_options: [], after: 'music' }} kind="persona" />);
++    await fireEvent.input(screen.getByLabelText('审批后的值'), { target: { value: 'new\nvalue' } });
++    await fireEvent.click(screen.getByRole('button', { name: /驳回/ }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/qq_profile_test/review', { action: 'reject' }));
++  });
++
++  it('keeps existing persona reviews on their original payload', async () => {
++    render(() => <ReviewCard item={{ id: '12', title: 'Persona', after: 'text' }} kind="persona" />);
++    expect(screen.queryByLabelText('审批后的值')).toBeNull();
++    await fireEvent.click(screen.getByRole('button', { name: /通过/ }));
++    await waitFor(() => expect(mocks.post).toHaveBeenCalledWith('/api/persona_updates/12/review', { action: 'approve' }));
++  });
++});
+--- a/web_src/src/components/business/ReviewCard.tsx
++++ b/web_src/src/components/business/ReviewCard.tsx
+@@ -1,4 +1,4 @@
+-import { createSignal, For, Show } from 'solid-js';
++import { createEffect, createSignal, For, Show } from 'solid-js';
+ import { api } from '../../services/api';
+ import { useDashboard } from '../../stores/dashboard';
+ import type { ReviewItem } from '../../types/dashboard';
+@@ -20,20 +20,29 @@
+   const dashboard = useDashboard();
+   const [busy, setBusy] = createSignal(false);
+   const id = () => String(props.item.id ?? '');
+-  const execute = async (action: 'approve' | 'reject' | 'delete') => {
++  const isProfile = () => props.item.review_source === 'qq_profile';
++  const pendingProfile = () => isProfile() && props.item.status === 'pending';
++  const [edited, setEdited] = createSignal('');
++  createEffect(() => setEdited(String(props.item.after ?? '')));
++  const fieldOptions = () => Array.isArray(props.item.field_options) ? props.item.field_options as string[] : [];
++  const evidence = () => Array.isArray(props.item.evidence) ? props.item.evidence as { text: string; timestamp: number }[] : [];
++  const execute = async (action: 'approve' | 'reject' | 'delete' | 'revert') => {
+     if (!id()) return;
+     const destructive = action !== 'approve';
+     if (!await dashboard.confirm({
+       title: action === 'delete' ? '删除审查记录' : '审查确认',
+-      message: `确定${action === 'approve' ? '通过' : action === 'reject' ? '驳回' : '删除'}“${titleFor(props.item)}”吗？`,
+-      confirmText: action === 'approve' ? '批准' : action === 'reject' ? '驳回' : '删除',
++      message: `确定${action === 'approve' ? '通过' : action === 'reject' ? '驳回' : action === 'revert' ? '撤回' : '删除'}“${titleFor(props.item)}”吗？`,
++      confirmText: action === 'approve' ? '批准' : action === 'reject' ? '驳回' : action === 'revert' ? '撤回' : '删除',
+       tone: destructive ? 'danger' : 'success',
+     })) return;
+     setBusy(true);
+     try {
+       if (props.kind === 'persona') {
+-        if (action === 'delete') await api.post(`/api/persona_updates/${encodeURIComponent(id())}/delete`, {});
+-        else await api.post(`/api/persona_updates/${encodeURIComponent(id())}/review`, { action });
++        if (action === 'revert') await api.post(`/api/persona_updates/${encodeURIComponent(id())}/revert`, {});
++        else if (action === 'delete') await api.post(`/api/persona_updates/${encodeURIComponent(id())}/delete`, {});
++        else await api.post(`/api/persona_updates/${encodeURIComponent(id())}/review`, {
++          action, ...(isProfile() && action === 'approve' ? { modified_content: edited() } : {}),
++        });
+       } else if (props.kind === 'style') {
+         const reviewId = id().replace(/^style_/, '');
+         if (action === 'delete') await api.delete(`/api/style_learning/reviews/${encodeURIComponent(reviewId)}`);
+@@ -51,8 +60,8 @@
+   };
+   // 后端把快照放在 change_preview/change_snapshot 中；只读顶层字段会让
+   // 「查看变更详情」整块消失，导致审查人看不到修改内容（issue #280）。
+-  const before = () => reviewBeforePrompt(props.item);
+-  const after = () => reviewAfterPrompt(props.item);
++  const before = () => isProfile() ? String(props.item.before ?? '') : reviewBeforePrompt(props.item);
++  const after = () => isProfile() ? String(props.item.after ?? '') : reviewAfterPrompt(props.item);
+   const dialogDiff = () => reviewBeginDialogs(props.item);
+   const meta = () => reviewChangeMeta(props.item);
+   const proposedContent = () => {
+@@ -70,7 +79,26 @@
+       <Show when={props.item.definition || props.item.meaning || props.item.review_detail}>
+         <p>{textOrDash(props.item.definition ?? props.item.meaning ?? props.item.review_detail)}</p>
+       </Show>
+-      <Show when={props.kind !== 'jargon' && (reviewHasChange(props.item) || meta().length || proposedContent())}>
++      <Show when={isProfile()}>
++        <Show when={props.item.stale_reason}><p>{textOrDash(props.item.stale_reason)}</p></Show>
++        <p>仅修改此成员的“{textOrDash(props.item.field_label)}”。批准后保存，拒绝则保持原设置。</p>
++        <Show when={pendingProfile()}>
++        <label>审批后的值（可修改）
++          <Show when={fieldOptions().length > 0 && props.item.field_type !== 'list'} fallback={
++            <textarea aria-label="审批后的值" rows={4} value={edited()} onInput={(event) => setEdited(event.currentTarget.value)} />
++          }>
++            <select aria-label="审批后的值" value={edited()} onChange={(event) => setEdited(event.currentTarget.value)}>
++              <For each={fieldOptions()}>{option => <option value={option}>{option}</option>}</For>
++            </select>
++          </Show>
++        </label>
++        <Show when={props.item.field_type === 'list'}><small>每行一项。{fieldOptions().length ? `可选：${fieldOptions().join('、')}` : ''}</small></Show>
++        </Show>
++        <details open><summary>聊天依据</summary>
++          <For each={evidence()}>{item => <blockquote><small>{formatTime(item.timestamp)}</small><p>{item.text}</p></blockquote>}</For>
++        </details>
++      </Show>
++      <Show when={props.kind !== 'jargon' && (before() || after() || reviewHasChange(props.item) || meta().length || proposedContent())}>
+         <details class={styles['review-diff']}>
+           <summary>查看变更详情</summary>
+           <Show when={props.kind !== 'jargon' && (before() || after())}>
+@@ -105,8 +133,13 @@
+         <pre>{summarize(props.item)}</pre>
+       </details>
+       <div class={styles['review-actions']}>
++        <Show when={!isProfile() || pendingProfile()}>
+         <Button size="sm" tone="success" icon="check" loading={busy()} onClick={() => execute('approve')}>通过</Button>
+         <Button size="sm" tone="warning" icon="close" loading={busy()} onClick={() => execute('reject')}>驳回</Button>
++        </Show>
++        <Show when={isProfile() && ['approved', 'rejected'].includes(String(props.item.status))}>
++          <Button size="sm" tone="warning" loading={busy()} onClick={() => execute('revert')}>撤回</Button>
++        </Show>
+         <Button size="sm" tone="danger" icon="delete" loading={busy()} onClick={() => execute('delete')}>删除</Button>
+       </div>
+     </Card>
+--- a/web_src/src/pages/emotion/EmotionBoardPage.tsx
++++ b/web_src/src/pages/emotion/EmotionBoardPage.tsx
+@@ -28,7 +28,7 @@
+   emotion_profiles: { total: number; dominant_distribution: Array<{ emotion: string; count: number }> };
+   gate: { daily: GateDaily[]; telemetry: GateTelemetry | null };
+   forgetting: {
+-    enabled: boolean; running: boolean; last_run_at: number | null;
++    enabled: boolean; approval_required?: boolean; running: boolean; last_run_at: number | null;
+     config: Record<string, number | boolean>;
+     stage_labels: Record<string, string>;
+     distribution: Record<string, Record<string, number>>;
+@@ -177,7 +177,7 @@
+         <StatCard
+           label="遗忘候选" icon="delete_sweep"
+           value={formatCount(candidates().length)}
+-          note={forgetting()?.enabled ? `周期 ${forgetting()!.config.cycle_days} 天` : '遗忘未启用'}
++          note={forgetting()?.approval_required ? '审批模式：自动遗忘已关闭，需逐项确认' : forgetting()?.enabled ? `周期 ${forgetting()!.config.cycle_days} 天` : '遗忘未启用'}
+           tone={candidates().length ? 'warning' : 'default'}
+         />
+       </div>
+--- a/web_src/src/pages/home/HomePage.tsx
++++ b/web_src/src/pages/home/HomePage.tsx
+@@ -2,7 +2,7 @@
+ import { useDashboard } from '../../stores/dashboard';
+ import type { IntegrationItem, PageId, Tone } from '../../types/dashboard';
+ import { formatCount, formatPercent, safeNumber } from '../../lib/format';
+-import { list, jargonPendingTotal, object, reviews } from '../shared';
++import { list, object, reviewPendingCounts } from '../shared';
+ import { Badge, Card } from '../../components/ui';
+ import { PageHeader } from '../../components/layout/PageHeader';
+ import styles from './HomePage.module.scss';
+@@ -43,17 +43,13 @@
+     const trends = object(dashboard.data.trends);
+     const jargon = object(dashboard.data.jargon_stats);
+     const statistics = object(object(dashboard.data.data_statistics).data ?? dashboard.data.data_statistics);
+-    const personaPayload = object(dashboard.data.persona_updates);
+-    const stylePayload = object(dashboard.data.style_learning_reviews);
+-    const personaItems = reviews(dashboard.data, 'persona_updates');
+-    const personaTotal = safeNumber(personaPayload.total, personaItems.length);
+-    const styleTotal = safeNumber(stylePayload.total, reviews(dashboard.data, 'style_learning_reviews').length);
+-    const personaIncludesStyle = personaItems.some((item) => item.review_source === 'style_learning');
+-    const personaPending = personaIncludesStyle ? Math.max(0, personaTotal - styleTotal) : personaTotal;
++    const counts = reviewPendingCounts(dashboard.data);
++    const styleTotal = counts.style;
++    const personaPending = counts.persona;
+     const jargonCandidates = safeNumber(jargon.total_candidates ?? object(jargon.data).total_candidates);
+     const jargonConfirmed = safeNumber(jargon.confirmed_jargon ?? object(jargon.data).confirmed_jargon);
+     // 待审数与审查队列同源：读待审接口的分页 total，已驳回（is_complete）不再计入
+-    const jargonPending = jargonPendingTotal(dashboard.data);
++    const jargonPending = counts.jargon;
+     const contentCount = safeNumber(statistics.style_learning);
+     const graphNodes = safeNumber(statistics.memory) + safeNumber(statistics.knowledge_graph);
+     const integrations = list<IntegrationItem>(
+@@ -66,7 +62,7 @@
+     const filtered = safeNumber(metrics.filtered_messages);
+     const filterRate = totalMessages ? filtered / totalMessages * 100 : 0;
+     const learningEfficiency = safeNumber(metrics.learning_efficiency);
+-    const backlog = personaPending + styleTotal + jargonPending;
++    const backlog = counts.total;
+     const batches = list(trends.recent_batches).length;
+     const llmSummary = object(metrics.llm_call_summary);
+     const llmCalls = safeNumber(llmSummary.total_calls);
+--- a/web_src/src/pages/insights/InsightsPage.tsx
++++ b/web_src/src/pages/insights/InsightsPage.tsx
+@@ -2,7 +2,7 @@
+ import { useDashboard } from '../../stores/dashboard';
+ import type { PageId, Tone } from '../../types/dashboard';
+ import { formatCount } from '../../lib/format';
+-import { metric, jargonPendingTotal, object } from '../shared';
++import { metric, object, reviewPendingCounts } from '../shared';
+ import { Badge, Button, Card, EmptyState } from '../../components/ui';
+ import { PageHeader } from '../../components/layout/PageHeader';
+ import styles from './InsightsPage.module.scss';
+@@ -12,11 +12,7 @@
+ export function InsightsPage() {
+   const dashboard = useDashboard();
+   const insights = createMemo<Insight[]>(() => {
+-    const persona = object(dashboard.data.persona_updates);
+-    const style = object(dashboard.data.style_learning_reviews);
+-    // 与首页待办同源：读待审接口分页 total，已驳回不再计入
+-    const backlog = Number(persona.total || 0) + Number(style.total || 0)
+-      + jargonPendingTotal(dashboard.data);
++    const backlog = reviewPendingCounts(dashboard.data).total;
+     const filtered = metric(dashboard.data, ['metrics.filtered_messages', 'metrics.messages.filtered']);
+     const failures = Object.values(object(object(dashboard.data.health).checks))
+       .filter((item) => object(item).status && object(item).status !== 'healthy').length;
+--- a/web_src/src/pages/reviews/ReviewsPage.tsx
++++ b/web_src/src/pages/reviews/ReviewsPage.tsx
+@@ -1,16 +1,17 @@
+ import { createSignal, For, onMount, Show } from 'solid-js';
+ import { api } from '../../services/api';
+ import { useDashboard } from '../../stores/dashboard';
+-import { list, object, reviews } from '../shared';
++import { list, object, reviews, reviewPendingCounts } from '../shared';
+ import type { ReviewKind, } from '../../components/business/ReviewCard';
+ import { ReviewCard } from '../../components/business/ReviewCard';
++import { LearningApprovalPanel } from '../../components/business/LearningApprovalPanel';
+ import { formatDecimal, formatTime, textOrDash } from '../../lib/format';
+ import { Button, Card, EmptyState, Pagination, Panel } from '../../components/ui';
+ import { PageHeader } from '../../components/layout/PageHeader';
+ import styles from './ReviewsPage.module.scss';
+ 
+ const config: Record<ReviewKind, { title: string; endpoint: string }> = {
+-  persona: { title: '待审人格', endpoint: '/api/persona_updates' },
++  persona: { title: '人格与个人设置', endpoint: '/api/persona_updates' },
+   style: { title: '风格审查', endpoint: '/api/style_learning/reviews' },
+   jargon: { title: '黑话审查', endpoint: '/api/jargon' },
+ };
+@@ -77,7 +78,9 @@
+   };
+   return (
+     <div class="page">
+-      <PageHeader title="审查队列" description="集中处理人格更新、表达风格和群聊黑话。" icon="fact_check" />
++      <PageHeader title="审查队列" description="集中处理人格更新、个人相处设置、表达风格和群聊黑话。个人设置建议只有批准后才写入对应成员。" icon="fact_check" />
++      <p>有效待审共 {reviewPendingCounts(dashboard.data).total} 条（表达不重复计数，失效建议不计入）。AstrBot 内嵌面板与此页使用同一审批服务。</p>
++      <LearningApprovalPanel />
+       <div class={styles['review-columns']}>
+         <For each={Object.keys(config) as ReviewKind[]}>{(kind) =>
+           <Panel title={config[kind].title} actions={
+@@ -93,6 +96,13 @@
+           </Panel>
+         }</For>
+       </div>
++      <Panel title="个人设置审查历史" hint="撤回会恢复该次审批前的值；有后续变更时不会覆盖。删除只移除记录。">
++        <div class="review-list">
++          <For each={reviews(dashboard.data, 'persona_reviewed').filter(item => item.review_source === 'qq_profile')} fallback={<EmptyState title="暂无个人设置审查历史" />}>
++            {item => <ReviewCard item={item} kind="persona" />}
++          </For>
++        </div>
++      </Panel>
+       <Panel title="最近学习批次" hint="支持重新学习和删除历史批次" actions={<Button icon="refresh" loading={batchLoading()} onClick={loadBatches}>刷新批次</Button>}>
+         <div class={styles['batch-grid']}>
+           <For each={batches()} fallback={<EmptyState title="暂无批次记录" />}>{(item) =>
+--- a/web_src/src/pages/shared.test.ts
++++ b/web_src/src/pages/shared.test.ts
+@@ -1,5 +1,5 @@
+ import { describe, expect, it } from 'vitest';
+-import { jargonPendingTotal } from './shared';
++import { jargonPendingTotal, reviewPendingCounts } from './shared';
+ import type { DashboardSnapshot } from '../types/dashboard';
+ 
+ describe('jargonPendingTotal', () => {
+@@ -47,3 +47,15 @@
+     expect(jargonPendingTotal(data)).toBe(3);
+   });
+ });
++
++it('counts each approval source once, including affection but excluding stale history', () => {
++  const data = {
++    persona_updates: { total: 8, source_counts: { style_learning: 7, qq_profile: 1 },
++      updates: [{ id: 'style_1', review_source: 'style_learning' }] },
++    style_learning_reviews: { total: 7, reviews: [{ id: 1 }] },
++    jargon_reviews: { total: 2, jargon_list: [{ id: 1 }] },
++    affection_reviews: { reviews: [{ status: 'pending' }, { status: 'pending' },
++      { status: 'stale' }, { status: 'approved' }, { status: 'rejected' }] },
++  } as DashboardSnapshot;
++  expect(reviewPendingCounts(data)).toEqual({ persona: 1, style: 7, jargon: 2, affection: 2, total: 12 });
++});
+--- a/web_src/src/pages/shared.ts
++++ b/web_src/src/pages/shared.ts
+@@ -42,5 +42,19 @@
+   return fallback;
+ };
+ 
++export const reviewPendingCounts = (data: DashboardSnapshot) => {
++  const personaPayload = object(data.persona_updates);
++  const personaRows = reviews(data, 'persona_updates');
++  const personaTotal = safeNumber(personaPayload.total, personaRows.length);
++  const sources = object(personaPayload.source_counts);
++  const includedStyle = safeNumber(sources.style_learning,
++    personaRows.filter(row => row.review_source === 'style_learning').length);
++  const persona = Math.max(0, personaTotal - includedStyle);
++  const style = safeNumber(object(data.style_learning_reviews).total, reviews(data, 'style_learning_reviews').length);
++  const jargon = jargonPendingTotal(data);
++  const affection = reviews(data, 'affection_reviews').filter(row => row.status === 'pending').length;
++  return { persona, style, jargon, affection, total: persona + style + jargon + affection };
++};
++
+ export const labelValueRows = (value: unknown): Array<[string, unknown]> =>
+   Object.entries(object(value)).filter(([, item]) => typeof item !== 'object').slice(0, 12);
+--- a/web_src/src/stores/dashboard.tsx
++++ b/web_src/src/stores/dashboard.tsx
+@@ -93,15 +93,16 @@
+         api.get<UnknownRecord>('/api/metrics/trends'),
+         api.get<UnknownRecord>('/api/monitoring/health'),
+         api.get<UnknownRecord>('/api/monitoring/functions'),
+-        api.get<UnknownRecord>('/api/persona_updates?limit=10'),
+-        api.get<UnknownRecord>('/api/style_learning/reviews?limit=5'),
+-        api.get<UnknownRecord>('/api/jargon/list?page_size=5&confirmed=false&pending=true'),
++        api.get<UnknownRecord>('/api/persona_updates?limit=0'),
++        api.get<UnknownRecord>('/api/style_learning/reviews?limit=0'),
++        api.get<UnknownRecord>('/api/jargon/list?page_size=200&confirmed=false&pending=true'),
+         api.get<UnknownRecord>('/api/jargon/stats'),
+         api.get<UnknownRecord>('/api/persona_management/current?group_id=default'),
+         api.get<UnknownRecord>('/api/persona_backups/list?limit=8'),
+         api.get<UnknownRecord>('/api/persona_updates/reviewed?limit=5'),
+         api.get<UnknownRecord>('/api/data/statistics'),
+         api.get<UnknownRecord>('/api/hub/v1/status'),
++        api.get<UnknownRecord>('/api/affection_reviews?status=all'),
+       ]);
+       if (token !== refreshToken) return;
+       const value = (index: number) => responses[index].status === 'fulfilled'
+@@ -118,6 +119,7 @@
+         jargon_reviews: rawValue(6),
+         jargon_stats: value(7), persona_current: value(8), persona_backups: value(9),
+         persona_reviewed: value(10), data_statistics: value(11), hub_status: value(12),
++        affection_reviews: value(13),
+       }));
+       setLastUpdated(new Date());
+       if (responses.every((item) => item.status === 'rejected')) throw new Error('所有 Dashboard 接口均请求失败');
+--- /dev/null
++++ b/web_src/src/test/embedded-reviews.test.ts
+@@ -0,0 +1,74 @@
++import { readFileSync } from 'node:fs';
++import { fireEvent, waitFor } from '@solidjs/testing-library';
++import { expect, it, vi } from 'vitest';
++
++it('renders shared approvals, refreshes external decisions and protects an edited profile', async () => {
++  const html = readFileSync('../pages/dashboard/index.html', 'utf8');
++  const script = readFileSync('../pages/dashboard/app.js', 'utf8');
++  document.body.innerHTML = html.match(/<body[^>]*>([\s\S]*)<\/body>/i)![1];
++  window.history.replaceState(null, '', '#/reviews');
++  vi.spyOn(window, 'requestAnimationFrame').mockReturnValue(1);
++  vi.spyOn(HTMLCanvasElement.prototype, 'getContext').mockReturnValue(null);
++  let refresh: (() => void) | undefined;
++  const originalInterval = window.setInterval.bind(window);
++  vi.spyOn(window, 'setInterval').mockImplementation(((handler: TimerHandler, timeout?: number) => {
++    if (timeout === 60_000) {
++      refresh = handler as () => void;
++      return 123;
++    }
++    return originalInterval(handler, timeout);
++  }) as typeof window.setInterval);
++  Object.defineProperty(document, 'hidden', { configurable: true, value: false });
++  const rows = [
++    { id: 1, user_id: '123', group_id: '456', before: 0, after: 5, status: 'pending', message: 'A valid interaction' },
++    { id: 2, user_id: '123', group_id: '456', before: 1, after: 3, status: 'stale', stale_reason: 'Base value changed', message: 'Old evidence' },
++  ];
++  const payload = () => ({
++    approval_settings: { require_approval: true, require_affection_approval: false },
++    persona_pending: { updates: [{ id: 'qq_profile_example', title: 'Member setting', review_source: 'qq_profile', before: 'Old setting', after: 'Proposed setting', evidence: [{ text: 'Explicit preference' }] }], total: 1, source_counts: {} },
++    persona_reviewed: { updates: [] }, style_reviews: { reviews: [], total: 0 },
++    jargon_pending: { jargon_list: [], total: 0 }, affection_reviews: { reviews: rows },
++    pending_total: 1 + rows.filter(row => row.status === 'pending').length,
++  });
++  const get = vi.fn(async () => JSON.parse(JSON.stringify(payload())));
++  const post = vi.fn(async (_path: string, body: { id: string; decision: string }) => {
++    rows.find(row => String(row.id) === body.id)!.status = body.decision === 'approve' ? 'approved' : 'rejected';
++    return { success: true, message: 'Saved' };
++  });
++  Object.defineProperty(window, 'AstrBotPluginPage', { configurable: true, value: {
++    ready: async () => ({}), apiGet: get, apiPost: post,
++  } });
++  try {
++    window.eval(script);
++    await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 1 · 失效 1'));
++    expect(document.getElementById('learning-approval-state')).toHaveTextContent('学习内容审批：已开启');
++    expect(document.getElementById('affection-approval-state')).toHaveTextContent('好感度审批：已关闭，新的变化直接生效');
++    expect(document.getElementById('affection-review-history')).toHaveTextContent('Old evidence');
++    expect(document.querySelector('#affection-review-history [data-review-action="approve"]')).toBeNull();
++    expect(post).not.toHaveBeenCalled();
++    fireEvent.click(document.querySelector('[data-kind="affection"][data-review-action="approve"]')!);
++    await waitFor(() => expect(document.getElementById('modal-confirm-ok')).not.toBeNull());
++    expect(post).not.toHaveBeenCalled();
++    fireEvent.click(document.getElementById('modal-confirm-ok')!);
++    await waitFor(() => expect(post).toHaveBeenCalledWith('page/reviews/action', { action: 'affection_review', id: '1', decision: 'approve' }));
++    await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 0 · 失效 1'));
++    rows.push({ id: 3, user_id: '789', group_id: '456', before: 0, after: 2, status: 'pending', message: 'New external suggestion' });
++    refresh!();
++    await waitFor(() => expect(document.getElementById('affection-review-list')).toHaveTextContent('New external suggestion'));
++    rows[2].status = 'rejected';
++    window.dispatchEvent(new Event('focus'));
++    await waitFor(() => expect(document.getElementById('affection-review-count')).toHaveTextContent('待处理 0 · 失效 1'));
++    const editor = document.querySelector('[data-profile-value]') as HTMLTextAreaElement;
++    fireEvent.input(editor, { target: { value: 'Unsaved owner edit' } });
++    const calls = get.mock.calls.length;
++    refresh!();
++    window.dispatchEvent(new Event('focus'));
++    await Promise.resolve();
++    expect(get).toHaveBeenCalledTimes(calls);
++    expect(editor.value).toBe('Unsaved owner edit');
++  } finally {
++    window.dispatchEvent(new Event('pagehide'));
++    vi.restoreAllMocks();
++    document.body.innerHTML = '';
++  }
++});
+--- a/webui/blueprints/hub.py
++++ b/webui/blueprints/hub.py
+@@ -8,6 +8,7 @@
+ from ..middleware.hub_aspects import HubApiError, hub_route, hub_success
+ from ..services.hub_service import HubService
+ from ..utils.response import add_no_store_headers
++from .persona_reviews import require_review_access
+ 
+ hub_bp = Blueprint("hub", __name__, url_prefix="/api/hub/v1")
+ 
+@@ -92,6 +93,7 @@
+ 
+ @hub_bp.route("/reviews/<review_id>/decision", methods=["POST"])
+ @hub_route
++@require_review_access
+ async def decide_review(review_id: str):
+     """Approve or reject a review queue item."""
+     try:
+@@ -120,6 +122,7 @@
+ 
+ @hub_bp.route("/metrics", methods=["GET"])
+ @hub_route
++@require_review_access
+ async def metrics():
+     """Return hub-level metrics for a group."""
+     group_id = str(request.args.get("group_id") or "default")
+--- a/webui/blueprints/jargon.py
++++ b/webui/blueprints/jargon.py
+@@ -7,6 +7,7 @@
+ from ..dependencies import get_container
+ from ..services.jargon_service import JargonService
+ from ..middleware.auth import require_auth
++from .persona_reviews import require_review_access
+ from ..utils.response import success_response, error_response
+ 
+ jargon_bp = Blueprint('jargon', __name__, url_prefix='/api')
+@@ -208,7 +209,7 @@
+ 
+ 
+ @jargon_bp.route("/jargon/<int:jargon_id>/review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def review_jargon(jargon_id: int):
+     """确认或驳回黑话候选"""
+     try:
+@@ -239,7 +240,7 @@
+ 
+ 
+ @jargon_bp.route("/jargon/batch_review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def batch_review_jargon():
+     """批量确认或驳回黑话候选"""
+     try:
+--- a/webui/blueprints/learning.py
++++ b/webui/blueprints/learning.py
+@@ -7,6 +7,7 @@
+ from ..dependencies import get_container
+ from ..services.learning_service import LearningService
+ from ..middleware.auth import require_auth
++from .persona_reviews import require_review_access
+ from ..utils.response import success_response, error_response
+ 
+ learning_bp = Blueprint('learning', __name__, url_prefix='/api')
+@@ -100,7 +101,7 @@
+ 
+ 
+ @learning_bp.route("/style_learning/reviews/<int:review_id>/approve", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def approve_style_learning_review(review_id: int):
+     """批准对话风格学习审查 - 使用与人格学习审查相同的备份逻辑"""
+     try:
+@@ -126,7 +127,7 @@
+ 
+ 
+ @learning_bp.route("/style_learning/reviews/<int:review_id>/reject", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def reject_style_learning_review(review_id: int):
+     """拒绝对话风格学习审查"""
+     try:
+@@ -173,7 +174,7 @@
+ 
+ 
+ @learning_bp.route("/style_learning/reviews/batch_review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def batch_review_style_learning_reviews():
+     """批量批准或拒绝对话风格学习审查"""
+     try:
+--- a/webui/blueprints/metrics.py
++++ b/webui/blueprints/metrics.py
+@@ -9,6 +9,7 @@
+ from ..dependencies import get_container
+ from ..services.metrics_service import MetricsService
+ from ..middleware.auth import require_auth
++from .persona_reviews import require_review_access
+ from ..utils.response import success_response, error_response
+ 
+ metrics_bp = Blueprint('metrics', __name__, url_prefix='/api')
+@@ -141,7 +142,7 @@
+ 
+ 
+ @metrics_bp.route("/affection_metrics", methods=["GET"])
+-@require_auth
++@require_review_access
+ async def get_affection_metrics():
+     """获取好感度指标"""
+     try:
+--- a/webui/blueprints/persona_reviews.py
++++ b/webui/blueprints/persona_reviews.py
+@@ -7,13 +7,86 @@
+ from ..dependencies import get_container
+ from ..services.persona_review_service import PersonaReviewService
+ from ..middleware.auth import require_auth
++from ..services.auth_service import is_webui_password_enabled
+ from ..utils.response import success_response, error_response
++from functools import wraps
++from ipaddress import ip_address
+ 
+ persona_reviews_bp = Blueprint('persona_reviews', __name__, url_prefix='/api')
+ 
+ 
++def require_review_access(handler):
++    """Keep member evidence and approval local when WebUI has no password."""
++    @wraps(handler)
++    @require_auth
++    async def guarded(*args, **kwargs):
++        if not is_webui_password_enabled(get_container().plugin_config):
++            try:
++                address = ip_address(request.remote_addr or "")
++                local = address.is_loopback or bool(
++                    getattr(address, 'ipv4_mapped', None)
++                    and address.ipv4_mapped.is_loopback
++                )
++            except ValueError:
++                local = False
++            if not local:
++                return jsonify({"error": "免密模式下，审批页面仅允许本机访问；远程使用请先启用管理页密码。"}), 403
++        return await handler(*args, **kwargs)
++    return guarded
++
++
++@persona_reviews_bp.route("/affection_reviews", methods=["GET"])
++@require_review_access
++async def affection_reviews():
++    from ...services.learning.affection_review import AffectionReviewService
++
++    container = get_container()
++    status = request.args.get("status", "pending")
++    if status not in {"all", "pending", "stale", "approved", "rejected"}:
++        return jsonify({"error": "Invalid status"}), 400
++    rows = await AffectionReviewService(
++        container.database_manager, container.plugin_config
++    ).list_reviews(status)
++    return jsonify({"success": True, "reviews": rows, "total": len(rows)})
++
++
++@persona_reviews_bp.route("/affection_reviews/<int:review_id>/review", methods=["POST"])
++@require_review_access
++async def review_affection(review_id: int):
++    from ...services.learning.affection_review import AffectionReviewService
++
++    container = get_container()
++    data = await request.get_json() or {}
++    if data.get("action") not in {"approve", "reject"}:
++        return jsonify({"error": "Invalid action"}), 400
++    success, message = await AffectionReviewService(
++        container.database_manager, container.plugin_config
++    ).decide(review_id, data["action"])
++    return jsonify({"success": success, "message": message, **({} if success else {"error": message})}), 200 if success else 409
++
++
++@persona_reviews_bp.route("/learning_approval_status", methods=["GET"])
++@require_review_access
++async def learning_approval_status():
++    from sqlalchemy import select
++    from ...models.orm.affection import UserAffection
++
++    container = get_container()
++    db = container.database_manager
++    config = container.plugin_config
++    async with db.get_session() as session:
++        groups = list(await session.scalars(select(UserAffection.group_id).distinct()))
++    return jsonify({
++        "require_approval": bool(getattr(config, "require_learning_approval", False)),
++        "require_affection_approval": bool(getattr(config, "require_affection_approval", False)),
++        "learning_interval_hours": config.learning_interval_hours,
++        "min_messages": config.min_messages_for_learning,
++        "groups": groups,
++    })
++
++
+ @persona_reviews_bp.route("/persona_updates", methods=["GET"])
+-@require_auth
++@require_review_access
+ async def get_pending_persona_updates():
+     """获取所有待审查的人格更新 (整合三种数据源，支持分页)"""
+     try:
+@@ -37,7 +110,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/<update_id>/review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def review_persona_update(update_id: str):
+     """审查人格更新内容 (批准/拒绝)"""
+     try:
+@@ -67,7 +140,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/reviewed", methods=["GET"])
+-@require_auth
++@require_review_access
+ async def get_reviewed_persona_updates():
+     """获取已审查的人格更新列表"""
+     try:
+@@ -87,7 +160,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/<update_id>/revert", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def revert_persona_update(update_id: str):
+     """撤回人格更新审查"""
+     try:
+@@ -111,7 +184,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/<update_id>/delete", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def delete_persona_update(update_id: str):
+     """删除人格更新审查记录"""
+     try:
+@@ -130,7 +203,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/batch_delete", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def batch_delete_persona_updates():
+     """批量删除人格更新审查记录"""
+     try:
+@@ -157,7 +230,7 @@
+ 
+ 
+ @persona_reviews_bp.route("/persona_updates/batch_review", methods=["POST"])
+-@require_auth
++@require_review_access
+ async def batch_review_persona_updates():
+     """批量审查人格更新记录"""
+     try:
+--- a/webui/services/learning_service.py
++++ b/webui/services/learning_service.py
+@@ -88,7 +88,7 @@
+         if not self.database_manager:
+             raise ValueError('数据库管理器未初始化')
+ 
+-        pending_reviews = await self.database_manager.get_pending_style_reviews(limit=limit)
++        pending_reviews = await self.database_manager.get_pending_style_reviews(limit=limit or None)
+         persona_review_service = PersonaReviewService(self.container)
+ 
+         # 格式化审查数据
+--- a/webui/services/metrics_service.py
++++ b/webui/services/metrics_service.py
+@@ -251,6 +251,8 @@
+                 'high_affection_count': high_affection_count,
+                 'low_affection_count': low_affection_count,
+                 'distribution': distribution,
++                'users': affections,
++                'history': await self.database_manager.get_affection_history(group_id),
+             }
+         except Exception as e:
+             logger.error(f"获取好感度指标失败: {e}", exc_info=True)
+--- a/webui/services/persona_review_service.py
++++ b/webui/services/persona_review_service.py
+@@ -72,6 +72,23 @@
+     def _resolve_umo(self, group_id: str) -> str:
+         """将group_id解析为unified_msg_origin以支持多配置文件"""
+         return self.group_id_to_unified_origin.get(group_id, group_id)
++
++    def _profile_bridge(self):
++        """Resolve the active bridge without caching an unloaded plugin instance."""
++        plugin = _optional_container_attr(self.container, 'plugin_instance')
++        if not plugin:
++            return None
++        metadata = plugin.context.get_registered_star("astrbot_plugin_local_codex")
++        if metadata and metadata.activated and metadata.star_cls:
++            return getattr(metadata.star_cls, 'profile_review_api', None)
++        return None
++
++    async def _review_profile(self, update_id, action, modified_content=None, comment=""):
++        bridge = self._profile_bridge()
++        if not bridge:
++            return False, "本机 Codex 桥接未启用或版本不支持个人设置审批。"
++        return await bridge("review", row_id=update_id, action=action,
++                            modified_content=modified_content, comment=comment)
+ 
+     def _auto_apply_enabled(self) -> bool:
+         if not self.plugin_config:
+@@ -726,6 +743,10 @@
+             except Exception as e:
+                 logger.error(f"获取风格学习审查失败: {e}", exc_info=True)
+ 
++        bridge = self._profile_bridge()
++        if bridge:
++            all_updates.extend(await bridge("list"))
++
+         # 按时间倒序排列
+         all_updates.sort(key=lambda x: x.get('timestamp', 0), reverse=True)
+ 
+@@ -751,7 +772,11 @@
+         return {
+             "success": True,
+             "updates": paged_updates,
+-            "total": total
++            "total": total,
++            "source_counts": {
++                source: sum(item.get("review_source") == source for item in all_updates)
++                for source in {item.get("review_source", "unknown") for item in all_updates}
++            },
+         }
+ 
+     @staticmethod
+@@ -793,6 +818,9 @@
+             status = "rejected"
+         else:
+             return False, "Invalid action, must be 'approve' or 'reject'"
++
++        if update_id.startswith("qq_profile_"):
++            return await self._review_profile(update_id, action, modified_content, comment)
+ 
+         # 判断审查类型
+         if update_id.startswith("style_"):
+@@ -1068,6 +1096,12 @@
+         success = await self.database_manager.update_style_review_status(
+             review_id, 'approved', group_id=group_id
+         )
++
++        if not success:
++            return False, "表达审批保存失败，内容未启用，请重试"
++        if getattr(self.plugin_config, "require_learning_approval", False) is True:
++            # Scoped examples belong to the expression store, not a global persona.
++            return True, f"表达审查 {review_id} 已批准，样例已在原群组和人格范围启用"
+ 
+         if success and target_review['few_shots_content']:
+             # 自动追加到 begin_dialogs（通过 persona_web_manager，线程安全）
+@@ -1295,6 +1329,12 @@
+             except Exception as e:
+                 logger.warning(f"获取已审查风格学习更新失败: {e}")
+ 
++        bridge = self._profile_bridge()
++        if bridge:
++            profile_updates = await bridge("list", reviewed=True)
++            reviewed_updates.extend(row for row in profile_updates
++                                    if not status_filter or row['status'] == status_filter)
++
+         # 过滤掉无效记录（id 为 None 或空的条目）
+         reviewed_updates = [
+             u for u in reviewed_updates
+@@ -1321,6 +1361,9 @@
+         Returns:
+             Tuple[bool, str]: (是否成功, 消息)
+         """
++        if update_id.startswith("qq_profile_"):
++            return await self._review_profile(update_id, "revert", comment=reason)
++
+         # 判断撤回类型
+         if update_id.startswith("style_"):
+             # 风格学习审查撤回
+@@ -1374,6 +1417,9 @@
+         Returns:
+             Tuple[bool, str]: (是否成功, 消息)
+         """
++        if str(update_id).startswith("qq_profile_"):
++            return await self._review_profile(update_id, "delete")
++
+         if not self.database_manager:
+             return False, "Database manager not available"
+ 

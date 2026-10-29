@@ -1,5 +1,12 @@
 # 更新记录
 
+## v0.4.0
+
+- 分离模型接入与 QQ 功能：可选择现有 OpenAI Responses/Compatible API 模型，保留个人会话、群公共记忆、成员称呼与经历、角色设定、审批和工具权限。
+- API 模式不创建聊天或生图 CLI；视频识图改用所选 API，新增仅传公开查询的 Web Search 工具。生图直接调用 Images API，并复用原有意图限制、冷却、文件验证和 QQ 发送流程。
+- 隐藏 API 模式无用的 CLI 配置；提供主动消息群聊专用补丁，在两个配置入口隐藏私聊控制，并阻止私聊历史任务继续执行。
+- 更新适配 AstrBot 4.29.3、自学习 4.4.4、LivingMemory 2.8.2、点歌 3.5.0、表情包管理器 5.2.10 等稳定版本，累计补丁保留既有本地功能。
+
 ## 2026-10-28：好感度审批独立开关
 
 - 提供自学习 4.4.2 的[增量补丁](compat/affection-approval-20261028/README.md)：新增 `Affection_System_Settings.require_affection_approval`，默认关闭，且不继承学习内容审批开关；好感度涨跌直接生效并保留明细。

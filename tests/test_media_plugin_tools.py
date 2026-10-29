@@ -54,7 +54,7 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
 
     def setUp(self):
         self.modern = hasattr(self.plugin_class, "get_players_by_priority")
-        self.song = SimpleNamespace(id="1", name="Test song", artists="Test artist", duration=180000)
+        self.song = SimpleNamespace(id="1", name="Test song", artists="Test artist", duration=180000, lyrics="Fixture lyrics")
         self.player = SimpleNamespace(
             platform=SimpleNamespace(
                 name="netease",
@@ -63,6 +63,8 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
             ),
             platform_cfg=SimpleNamespace(priority=1, trigger_words=["网易云", "网易点歌"]),
             fetch_songs=AsyncMock(return_value=[self.song]),
+            fetch_lyrics=AsyncMock(),
+            resolve_lyrics=AsyncMock(),
         )
         self.plugin = object.__new__(self.plugin_class)
         self.plugin.players = [self.player]
@@ -90,6 +92,8 @@ class NativeMusicToolsTests(unittest.IsolatedAsyncioTestCase):
             properties["platform"] = {"type": "string"}
             if self.modern:
                 properties.update({"artist": {"type": "string"}, "send_mode": {"type": "string"}})
+        elif self.modern:
+            properties.update({"artist": {"type": "string"}, "platform": {"type": "string"}})
         original = copy.deepcopy(
             next(tool for tool in llm_tools.func_list if tool.name == name)
         )

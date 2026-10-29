@@ -1,12 +1,25 @@
 # Codex-QQ-AstrBotBridge
 
-把本机已登录 ChatGPT 的 Codex CLI 接入 QQ 私聊和群聊的 AstrBot 插件，适用于同一台 Windows 电脑上的本地部署。
+把 OpenAI API 或本机已登录 ChatGPT 的 Codex CLI 接入 QQ 的 AstrBot 插件，保留成员身份、个人对话、群公共记忆和媒体工具，适用于 Windows 本地部署。管理页面显示为“QQ 角色与群记忆桥接”，内部插件 ID 和数据目录不变。
 
 ```text
-QQ 普通账号 ⇄ NapCat ⇄ AstrBot / OneBot v11 ⇄ 本机 Codex CLI
+QQ 普通账号 ⇄ NapCat ⇄ AstrBot / OneBot v11 ⇄ OpenAI API / Codex CLI
 ```
 
-私聊直接发文字，指定群内任何成员 @机器人即可聊天；`/new` 显式开启自己的新会话。插件不要求填写 OpenAI API Key。v0.3 起可开启“接入 AstrBot 插件和人格”，由插件自动注册本机 Codex 提供商，复用 AstrBot 的人格、插件钩子和工具执行流程。
+私聊直接发文字，指定群内任何成员 @机器人即可聊天；`/new` 显式开启自己的新会话。API 模式复用 AstrBot 已配置的 API Key；CLI 模式使用 ChatGPT 登录。两种模式均可复用 AstrBot 的人格、插件钩子和工具执行流程。
+
+## v0.4：迁移到 API
+
+1. 在 AstrBot 配置已启用的 **OpenAI Responses** 模型；其他服务需确认兼容 Responses 或 Chat Completions。
+2. 保持本桥接启用，将“模型接入方式”设为 `api`，在“API 聊天模型”选择该模型。API 模式始终走 AstrBot 插件流程，CLI 路径、Fast、CLI 推理和并发选项自动隐藏。
+3. 将其他插件中显式指定的 `local_codex` 改为该 API 模型，或使用跟随默认模型；包括自学习、LivingMemory 的聊天模型、表情包识图、语音手记。**保留原 Embedding 模型与索引**。
+4. 重启 AstrBot。API 模式不启动聊天或生图 CLI，不修改 API 凭据，不在 API 失败时偷偷退回 CLI。
+
+聊天和视频识图使用所选 API 模型。联网搜索使用同一提供商的 Responses Web Search，生图使用 Images API（默认 `gpt-image-2.5-flare`、一张 1024×1024、中等质量）。第三方兼容服务必须自行支持对应接口；失败会如实返回。现成图片搜索、Edge TTS、RVC 和本地记忆索引沿用原服务。
+
+个人历史、成员设定、群共享上下文和审批数据均保存在原目录。`/new` 只新建当前个人会话，群公共上下文及长期记忆继续保留。API 模式仍执行原 QQ 工具权限检查，群员不能因此获得本机文件、Shell 或电脑权限。
+
+AstrBot 4.29.3 与各插件的更新基线和累计适配见 [2026-10-29 兼容更新](compat/updates-20261029/README.md)。主动消息的群聊专用配置可隐藏私聊控制并阻止旧私聊任务恢复，保留群随机发言和审批。
 
 v0.3.21 适配 bili 播放器 0.2.5 与点歌 3.3.1，保留旧版兼容、角色翻唱和群员工具权限。2026-10-26 的插件更新组合、累计补丁及配置迁移说明见 [本次兼容更新](compat/updates-20261026/README.md)。旧的个性化、群共享记忆、学习审批、随机主动消息和限流冷却继续保留。
 
@@ -24,10 +37,10 @@ v0.3.24 增加[审批界面同步补丁](compat/review-sync-20261027/README.md)�
 | 群公共记忆 | 可选共享本群近期公开聊天，保留每条 QQ 身份；配合 LivingMemory `group` 模式共享本群长期事实 |
 | 新会话 | 私聊 `/new`；群聊 `@机器人 /new` |
 | 输入输出 | 直接模式支持文本；插件接入模式支持图片、按需视频抽帧摘要、生图和语音回复；接收语音并转文字仍需另配 STT |
-| 并发 | 插件接入模式默认同时处理两个请求，超出后排队；直接模式一次一个，忙时提示重发 |
+| 并发 | API 使用 AstrBot/API 服务的限制；CLI 插件接入模式默认两个请求，直接模式一次一个 |
 | 个性化 | 按 QQ 号选择关系、语气和回复习惯；区分当前发送者与本条真实 @ 的成员，分别匹配称呼和相处设置 |
-| 回复速度 | 默认请求 Fast 模式，可关闭；不额外发送“稍等，我想一下” |
-| 联网搜索 | 可选启用 Codex 自带的在线搜索和公开网页读取，无须另填搜索 API Key |
+| 回复速度 | API 推理和服务速度在 AstrBot 模型参数中配置；CLI 默认 Fast；不发送等待提示 |
+| 联网搜索 | API 使用 Responses Web Search；CLI 使用内置在线搜索，无须另填搜索 Key |
 | 角色翻唱 | 可选独立 RVC 环境，将点歌候选转换为固定角色音色；需另配角色模型，默认前 60 秒片段 |
 | 平台 | Windows 原生运行，AstrBot 的 OneBot v11（`aiocqhttp`）适配器 |
 
@@ -37,11 +50,11 @@ v0.3.24 增加[审批界面同步补丁](compat/review-sync-20261027/README.md)�
 
 - AstrBot `>=4.29.1,<5`，安装在 Windows 本机。
 - NapCat 已登录用作机器人的 QQ 账号。
-- 同一个 Windows 用户下安装 Codex CLI，并完成 **Sign in with ChatGPT** 登录。
-- 已验证组合：Windows、Python 3.12、AstrBot 4.29.1、Codex CLI 0.162.0。其他 CLI 版本需确认支持本文使用的参数和功能开关。
+- API 模式：AstrBot 已配置可用的 API 模型。CLI 模式：同一个 Windows 用户下安装 Codex CLI，并完成 **Sign in with ChatGPT** 登录。
+- 已验证组合：Windows、Python 3.12、AstrBot 4.29.3、OpenAI Responses API；CLI 兼容检查使用 Codex CLI 0.162.0。其他 CLI 版本需确认支持本文使用的参数和功能开关。
 - 视频抽帧和 Edge TTS 音频转换需要 `ffmpeg`；视频还需要同目录的 `ffprobe`。插件依赖由 `requirements.txt` 声明，包含 `edge-tts>=7.3.1,<8`；图片验证使用 AstrBot 环境中的 Pillow。
 
-如果已经安装 Node.js，可以在 PowerShell 安装并检查 Codex：
+以下安装和登录步骤仅适用于 CLI 模式。已安装 Node.js 时，可在 PowerShell 安装并检查 Codex：
 
 ```powershell
 npm install -g @openai/codex
@@ -50,7 +63,7 @@ codex login status
 codex --version
 ```
 
-`login status` 应显示 `Logged in using ChatGPT`。本插件拒绝 API Key 登录模式，使用已登录账号的 Codex 额度，受账号权限和用量限制影响。ChatGPT 订阅不是通用的 API Key；本插件调用官方 CLI，不提取、转换或转发登录令牌。参见 [Codex 安装与登录说明](https://github.com/openai/codex#readme)。
+`login status` 应显示 `Logged in using ChatGPT`。桥接的 CLI 后端要求 ChatGPT 登录，使用该账号的 Codex 额度，受账号权限和用量限制影响；API Key 在 AstrBot 的 API 提供商中配置。ChatGPT 订阅不是通用的 API Key；CLI 后端调用官方 CLI，不提取、转换或转发登录令牌。参见 [Codex 安装与登录说明](https://github.com/openai/codex#readme)。
 
 AstrBot、NapCat 和 Codex 必须能在同一台电脑上正常运行。当前版本不能直接把 Windows 宿主机的 `codex.exe` 路径填进 Linux 或 Docker 里的 AstrBot。
 
@@ -258,9 +271,9 @@ RVC 改变声音特征，语速、停顿和语气仍取决于前面的 TTS，不
 
 ### 接入已下载的插件
 
-1. 开启桥接配置中的“接入 AstrBot 插件和人格”，保存。
+1. API 模式自动接入插件；CLI 模式需开启“接入 AstrBot 插件和人格”。
 2. 第一次切换后重启 AstrBot，使模型配置、会话隔离和缓存的消息流程设置一起生效。
-3. 在插件页面启用要使用的插件。需要选择聊天模型的插件，选择 **本机 Codex（ChatGPT 登录）**，提供商 ID 为 `local_codex`。
+3. 在插件页面启用要使用的插件。需要选择聊天模型时，API 模式选桥接中配置的 API 模型；CLI 模式选 `local_codex`。
 
 接入后的链路是：AstrBot 构造人格与历史 → 插件修改请求 → Codex 返回文本或工具调用 → AstrBot 执行插件工具 → Codex 根据结果继续回复 → 插件处理回复。命令插件仍由各自的命令触发，不会自动变成模型工具。
 
@@ -301,7 +314,7 @@ v0.3.18 可配合[链接解析 1.5.7 补丁](compat/parser/README.md)，把 B �
 
 小黑盒可能返回 `show_captcha`，要求验证码，导致正文无法取得。v0.3.19 的[解析增量](compat/parser/README.md#小黑盒验证码响应增量)会明确提示，并使用 QQ 分享卡片自带的标题和简介作为有限预览，成功发送后记入上下文；没有卡片摘要时只说明失败。它不会自动完成验证码，也不保证登录后网站一定放行。
 
-插件接入会把 AstrBot 实例的默认聊天模型设为 `local_codex`、开启群内按发送者隔离，并关闭工具状态提示；原值保存在桥接数据目录的 `settings-before-provider.json`。原直接模式的 Codex 历史不会导入，新聊天使用 AstrBot 自己的历史。关闭接入或卸载后，若需恢复原模型及会话设置，请在 AstrBot 配置中按备份恢复。
+插件接入会选择当前后端对应的聊天模型、开启群内按发送者隔离，并关闭工具状态提示。CLI 接入前的原值保存在 `settings-before-provider.json`；API 切换应另行备份实例配置。原直接模式的 Codex 历史不会导入；已有 AstrBot 历史可继续使用。关闭或卸载桥接会停止成员设定与群上下文注入，迁移到 API 时应保持桥接启用。
 
 群聊模型工具按下文“QQ 权限边界”中的名单开放；其他下载插件工具仅允许所有者私聊使用。不提供 AstrBot 内置的文件、Shell、定时任务和跨会话发送工具。下载插件仍有自身的能力和权限，应使用自己信任的插件。此桥接不是通用 API 服务，不提供 Embedding 或 STT；语音输出复用单独配置的 AstrBot TTS 提供商。
 
