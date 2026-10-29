@@ -1,0 +1,43 @@
+{
+  "component": "astrbot_plugin_proactive_chat",
+  "base": "v1.2.6 plus compat/updates-20261029/astrbot_plugin_proactive_chat.patch",
+  "patch_kind": "incremental",
+  "patch_sha256": "b51bf920823f965fc9bc5bccad5a6e0f164ad8fc798e247b0ec4829211abbc20",
+  "files": [
+    {
+      "path": "_conf_schema.json",
+      "before_lf_sha256": "da8d865d744f8cde2f23f6118b87aa66da01ad5044590e55ba0c47cfd2b310ee",
+      "after_lf_sha256": "86887835da1e73de811667e0f7f21ef8fc8703d17a5b116bfac7458c7b769e65"
+    },
+    {
+      "path": "core/chat_flow.py",
+      "before_lf_sha256": "b75d01c9463ad3082a9daae03ca26965f519dca7545d648e0dd10c3441550148",
+      "after_lf_sha256": "6117932be1106849be2f9821e8ea14bb032ac26bdb45082921da04413976ef5b"
+    },
+    {
+      "path": "core/data_storage.py",
+      "before_lf_sha256": "bcd5b0a05fe4540d99eba631a7c235eb84bcbc6fa2e869ddc42428e31bc31c8d",
+      "after_lf_sha256": "52a74c0ca44b60ca9592aa77c4319f474e299ad91f3857619ffbeb9dfbde9a54"
+    },
+    {
+      "path": "core/response_novelty.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "7baf5d922621b173461e9753450a1954ae44bd8db56093f68e19d438640115ea"
+    },
+    {
+      "path": "tests/test_bridge_sessions.py",
+      "before_lf_sha256": "5003d89f1068f51e581d2210aae9b92a352f9c94a419328a5c491df849e15b14",
+      "after_lf_sha256": "4ffff29104928fe4f194d9ceaa27704e44c8edd763bc75b92f7be4fe14dafcae"
+    },
+    {
+      "path": "tests/test_interval_scheduling.py",
+      "before_lf_sha256": "9079f729be7fb42de33c02b5107888b97b9cd940472b2527b4ae42703e865b9f",
+      "after_lf_sha256": "e81f95e33a8dc678d4cbeab260894ee39015541d8e9faac21f45844ff633853a"
+    },
+    {
+      "path": "tests/test_response_novelty.py",
+      "before_lf_sha256": null,
+      "after_lf_sha256": "8317b742f50db335b9a54e4324d355f668aa565c4c3f939fa0d0916baf1b4ffa"
+    }
+  ]
+}

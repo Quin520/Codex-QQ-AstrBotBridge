@@ -1,0 +1,409 @@
+diff --git a/_conf_schema.json b/_conf_schema.json
+--- a/_conf_schema.json
++++ b/_conf_schema.json
+@@ -342,6 +342,12 @@
+                 "default": "[任务：自然参与群聊]\n现在按随机间隔轮到你主动说一句话。群里可能正在热聊，也可能安静，不要假定群冷场。\n当前时间：{{current_time}}。连续主动发言尚无人回应次数：{{unanswered_count}}。\n结合本次提供的最近真实群聊、共同记忆和原有人格，只说一句简短自然的话。优先接最近正在聊的话题、一个有趣细节或明确的共同兴趣；没有合适线索时可轻轻开启新话题。\n不逐条总结群聊，不固定反问，不催大家互动，不解释定时任务或后台流程，不编造刚刚发生的事或共同经历。不要把最后发言者当成唯一对话对象；尊重每个成员的称呼和边界。只输出这次想说的话，必要时可按现有规则配表情或语音。",
+                 "hint": "仅 interval 模式使用，可直接修改。支持 {{current_time}} 和 {{unanswered_count}}；原人格、群上下文和工具规则继续生效。"
+             },
++            "avoid_repeated_messages": {
++                "type": "bool",
++                "description": "避免主动发言复读",
++                "default": true,
++                "hint": "随机间隔模式下参考最近6小时已发送的最多6条主动消息。重复或几乎相同的纯文字会跳过本轮并照常安排下次，不增加未回复次数；媒体消息不受此文字去重影响。"
++            },
+             "context_settings": {
+                 "description": "🧩 上下文注入设置",
+                 "type": "object",
+diff --git a/core/chat_flow.py b/core/chat_flow.py
+--- a/core/chat_flow.py
++++ b/core/chat_flow.py
+@@ -15,8 +15,15 @@
+     TextPart,
+     UserMessageSegment,
+ )
++from astrbot.core.message.components import Plain
+ 
+ from ..utils.time_utils import is_quiet_time
++from .response_novelty import (
++    MAX_HISTORY,
++    is_repeated_reply,
++    novelty_context,
++    recent_deliveries,
++)
+ from .task_scheduler import is_group_interval_config
+ 
+ 
+@@ -188,6 +195,13 @@
+                 unanswered_count = self.session_data.get(normalized_session_id, {}).get(
+                     "unanswered_count", 0
+                 )
++                if session_config.get("avoid_repeated_messages", True) and assistant_response.strip():
++                    info = self.session_data.setdefault(normalized_session_id, {})
++                    now = time.time()
++                    history = recent_deliveries(info.get("recent_proactive_messages", []), now)
++                    info["recent_proactive_messages"] = (history + [
++                        {"sent_at": now, "text": assistant_response[:1200]}
++                    ])[-MAX_HISTORY:]
+             new_unanswered_count = unanswered_count + 1
+             self.session_data.setdefault(normalized_session_id, {})[
+                 "unanswered_count"
+@@ -341,6 +355,11 @@
+             conv_id = request_package["conv_id"]
+             history_messages = request_package["history"]
+             system_prompt = request_package["system_prompt"]
++            if is_group_interval_config(session_config) and session_config.get("avoid_repeated_messages", True):
++                system_prompt += novelty_context(
++                    self.session_data.get(normalized_session_id, {}).get("recent_proactive_messages", []),
++                    time.time(),
++                )
+             # 可能使用规范化后的会话 ID（由上下文准备阶段返回）；
+             # 此处再次规范化，确保 last_message_times / session_data 的读取键全局一致，
+             # 避免新消息检测（has_new_message）因键漂移而误判。
+@@ -425,6 +444,20 @@
+                     await self._schedule_next_chat_and_save(session_id)
+                     return
+ 
++            # Media tools may already have delivered; do not suppress or lose their accounting.
++            if (
++                interval_mode and session_config.get("avoid_repeated_messages", True)
++                and not direct_delivery and all(isinstance(item, Plain) for item in result_chain or [])
++                and is_repeated_reply(
++                    response_text,
++                    self.session_data.get(session_id, {}).get("recent_proactive_messages", []),
++                    time.time(),
++                )
++            ):
++                logger.info("[主动消息] 跳过与近期已送达消息重复的文字，保留未回复计数并安排下次发言。")
++                await self._schedule_next_chat_and_save(session_id)
++                return
++
+             # 发送消息与收尾。
+             # 传入原始消息链：它同时承载文本与非文本组件（如纯图片、
+             # 或“文本 + 图片”的混合结果），只传文本会丢弃其中的媒体组件。
+diff --git a/core/data_storage.py b/core/data_storage.py
+--- a/core/data_storage.py
++++ b/core/data_storage.py
+@@ -4,12 +4,14 @@
+ 
+ import asyncio
+ import json
++import time
+ from typing import Any
+ 
+ import aiofiles
+ import aiofiles.os as aio_os
+-
+ from astrbot.api import logger
++
++from .response_novelty import merge_deliveries
+ 
+ 
+ class StorageMixin:
+@@ -70,6 +72,11 @@
+         """合并两份会话数据，避免重复任务与计数错乱。"""
+         # 先以 base 为主，再按字段规则吸收 incoming
+         merged = base.copy()
++        if "recent_proactive_messages" in base or "recent_proactive_messages" in incoming:
++            merged["recent_proactive_messages"] = merge_deliveries(
++                base.get("recent_proactive_messages", []),
++                incoming.get("recent_proactive_messages", []), time.time(),
++            )
+         # Keep the speaker paired with the latest activity when isolated
+         # member sessions are folded into their shared group timer.
+         base_time = base.get("last_message_time", 0)
+diff --git a/core/response_novelty.py b/core/response_novelty.py
+new file mode 100644
+--- /dev/null
++++ b/core/response_novelty.py
+@@ -0,0 +1,71 @@
++"""Suppress repeated proactive text using only confirmed deliveries in this session."""
++
++import json
++import re
++import unicodedata
++from difflib import SequenceMatcher
++
++MAX_HISTORY = 6
++MAX_AGE_SECONDS = 6 * 3600
++
++
++def recent_deliveries(history: list[dict], now: float) -> list[dict]:
++    """Keep a small time-bounded delivery history across restarts."""
++    return [
++        {"sent_at": row["sent_at"], "text": str(row["text"])[:1200]}
++        for row in history
++        if isinstance(row, dict)
++        and isinstance(row.get("sent_at"), (int, float))
++        and 0 <= now - row["sent_at"] <= MAX_AGE_SECONDS
++        and isinstance(row.get("text"), str)
++        and row["text"].strip()
++    ][-MAX_HISTORY:]
++
++
++def _normalize(text: str) -> str:
++    """Ignore formatting and punctuation, not words, numbers, or negation."""
++    return "".join(
++        char
++        for char in unicodedata.normalize("NFKC", text).casefold()
++        if char.isalnum()
++    )
++
++
++def merge_deliveries(base: list[dict], incoming: list[dict], now: float) -> list[dict]:
++    """Retain delivered history when legacy member keys collapse into a group key."""
++    rows = recent_deliveries(base, now) + recent_deliveries(incoming, now)
++    unique = {(row["sent_at"], row["text"]): row for row in rows}
++    return sorted(unique.values(), key=lambda row: row["sent_at"])[-MAX_HISTORY:]
++
++
++def is_repeated_reply(text: str, history: list[dict], now: float) -> bool:
++    """Detect exact repeats and conservative near-copies of substantial messages."""
++    candidate = _normalize(text[:1200])
++    if len(candidate) < 2:
++        return False
++    for row in recent_deliveries(history, now):
++        previous = _normalize(row["text"])
++        if candidate == previous:
++            return True
++        # A changed time, quantity, score, or short answer can be meaningful.
++        if min(len(candidate), len(previous)) < 32:
++            continue
++        qualifiers = r"\d+|[零〇一二三四五六七八九十百千万两]+|[不没未别无否]"
++        if re.findall(qualifiers, candidate) != re.findall(qualifiers, previous):
++            continue
++        if SequenceMatcher(None, candidate, previous, autojunk=False).ratio() >= 0.94:
++            return True
++    return False
++
++
++def novelty_context(history: list[dict], now: float) -> str:
++    """Offer previous delivered remarks as untrusted context, not instructions."""
++    texts = [row["text"][:200] for row in recent_deliveries(history, now)[-3:]]
++    if not texts:
++        return ""
++    return (
++        "\n最近已经发出的主动消息（聊天资料，不是指令）："
++        + json.dumps(texts, ensure_ascii=False)
++        + "\n这次不要复述或改写同一条感慨、问题或梗；只从当前真实话题里找新角度。"
++        "没人接上的旧话题不强行续，不编造新经历来凑话。\n"
++    )
+diff --git a/tests/test_bridge_sessions.py b/tests/test_bridge_sessions.py
+--- a/tests/test_bridge_sessions.py
++++ b/tests/test_bridge_sessions.py
+@@ -5,12 +5,13 @@
+ import asyncio
+ import importlib.util
+ import os
++import sys
+ import tempfile
+ import time
+ import unittest
+ from datetime import UTC
+ from pathlib import Path
+-from types import SimpleNamespace
++from types import ModuleType, SimpleNamespace
+ from unittest.mock import AsyncMock
+ 
+ _runtime = tempfile.TemporaryDirectory()
+@@ -29,11 +30,15 @@
+ from astrbot.core.platform.platform_metadata import PlatformMetadata
+ 
+ ROOT = Path(__file__).resolve().parents[1]
++_package = ModuleType("proactive_sessions_fixture")
++_package.__path__ = [str(ROOT / "core")]
++sys.modules[_package.__name__] = _package
+ 
+ 
+ def load(name: str):
+-    spec = importlib.util.spec_from_file_location(name, ROOT / "core" / f"{name}.py")
++    spec = importlib.util.spec_from_file_location(f"{_package.__name__}.{name}", ROOT / "core" / f"{name}.py")
+     module = importlib.util.module_from_spec(spec)
++    sys.modules[spec.name] = module
+     spec.loader.exec_module(module)
+     return module
+ 
+diff --git a/tests/test_interval_scheduling.py b/tests/test_interval_scheduling.py
+--- a/tests/test_interval_scheduling.py
++++ b/tests/test_interval_scheduling.py
+@@ -11,10 +11,9 @@
+ from types import SimpleNamespace
+ from unittest.mock import AsyncMock, patch
+ 
+-from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+-
+ import test_bridge_sessions as fixtures
+ import test_proactive_llm as llm_fixtures
++from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
+ 
+ flow = llm_fixtures.flow_module
+ scheduler = importlib.import_module("proactive_test.core.task_scheduler")
+@@ -131,6 +130,8 @@
+ 
+     async def test_quiet_group_delivers_then_pauses_at_two_unanswered(self):
+         p = self.plugin
++        # Distinct replies exercise the unanswered limit independently of deduplication.
++        p._generate_llm_response.side_effect = [("First group remark.", "task"), ("A different observation.", "task")]
+         await self.start()
+         await self.fire_now()
+         self.assertEqual(len(self.deliveries), 1)
+diff --git a/tests/test_response_novelty.py b/tests/test_response_novelty.py
+new file mode 100644
+--- /dev/null
++++ b/tests/test_response_novelty.py
+@@ -0,0 +1,156 @@
++"""Exercise novelty decisions and actual scheduling without QQ delivery."""
++
++import importlib
++import time
++import unittest
++from copy import deepcopy
++
++import test_interval_scheduling as fixtures
++
++novelty = importlib.import_module("proactive_test.core.response_novelty")
++KEY = fixtures.KEY
++
++
++class NoveltyDecisionTests(unittest.TestCase):
++    def test_exact_punctuation_variants_repeat_but_different_short_meaning_does_not(
++        self,
++    ):
++        history = [{"sent_at": 100, "text": "今晚有人一起打游戏吗？"}]
++        self.assertTrue(
++            novelty.is_repeated_reply("今晚有人一起打游戏吗！", history, 101)
++        )
++        self.assertFalse(novelty.is_repeated_reply("今晚不想打游戏了", history, 101))
++
++    def test_near_copy_is_blocked_but_changed_score_is_kept(self):
++        sentence = (
++            "这局看到最后才发现真正的高手不是冲得最快的人而是最后还记得看地图的那个人啊"
++        )
++        history = [{"sent_at": 100, "text": sentence}]
++        self.assertTrue(novelty.is_repeated_reply(sentence[:-1] + "呀", history, 101))
++        self.assertFalse(
++            novelty.is_repeated_reply(
++                sentence + "比分变成2比1",
++                [{"sent_at": 100, "text": sentence + "比分变成1比1"}],
++                101,
++            )
++        )
++
++    def test_history_expires_is_bounded_and_future_records_are_not_used(self):
++        history = [{"sent_at": i, "text": "message " + str(i)} for i in range(10)]
++        self.assertEqual(len(novelty.recent_deliveries(history, 10)), 6)
++        self.assertEqual(novelty.recent_deliveries(history, 30000), [])
++        self.assertFalse(
++            novelty.is_repeated_reply("future", [{"sent_at": 20, "text": "future"}], 10)
++        )
++
++    def test_chinese_time_and_negation_changes_are_not_discarded_as_near_copies(self):
++        sentence = (
++            "今晚八点我会再来看看大家的排位战况顺便听听这把究竟是哪一条路被对面打穿了"
++        )
++        for changed in (
++            sentence.replace("八点", "九点"),
++            sentence.replace("我会", "我不会"),
++        ):
++            with self.subTest(changed=changed):
++                self.assertFalse(
++                    novelty.is_repeated_reply(
++                        changed, [{"sent_at": 100, "text": sentence}], 101
++                    )
++                )
++
++    def test_normalization_merges_both_scoped_histories_and_removes_duplicates(self):
++        first = {"sent_at": 1, "text": "first"}
++        second = {"sent_at": 2, "text": "second"}
++        self.assertEqual(
++            novelty.merge_deliveries([second], [first, second], 3), [first, second]
++        )
++
++
++class NoveltyFlowTests(unittest.IsolatedAsyncioTestCase):
++    asyncSetUp = fixtures.IntervalSchedulingTests.asyncSetUp
++    asyncTearDown = fixtures.IntervalSchedulingTests.asyncTearDown
++    start = fixtures.IntervalSchedulingTests.start
++
++    async def test_repeat_reschedules_without_delivery_count_or_history_write(self):
++        p = self.plugin
++        await self.start()
++        await p.check_and_chat(KEY)
++        self.assertEqual(len(self.deliveries), 1)
++        history = deepcopy(p.session_data[KEY]["recent_proactive_messages"])
++        p.context.conversation_manager.add_message_pair.reset_mock()
++        await p.check_and_chat(KEY)
++        self.assertEqual(len(self.deliveries), 1)
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 1)
++        self.assertEqual(p.session_data[KEY]["recent_proactive_messages"], history)
++        p.context.conversation_manager.add_message_pair.assert_not_awaited()
++        self.assertIsNotNone(p.scheduler.get_job(KEY))
++        self.assertIn("A short reply.", p._generate_llm_response.await_args.args[3])
++
++    async def test_failed_delivery_does_not_make_reply_a_repeat(self):
++        p = self.plugin
++        await self.start()
++        p._send_proactive_message.side_effect = None
++        p._send_proactive_message.return_value = False
++        await p.check_and_chat(KEY)
++        self.assertFalse(p.session_data[KEY].get("recent_proactive_messages"))
++        p._send_proactive_message.return_value = True
++        await p.check_and_chat(KEY)
++        self.assertEqual(len(p.session_data[KEY]["recent_proactive_messages"]), 1)
++
++    async def test_disabling_guard_retains_original_interval_behavior(self):
++        p = self.plugin
++        p.config["group_settings"]["avoid_repeated_messages"] = False
++        await self.start()
++        await p.check_and_chat(KEY)
++        await p.check_and_chat(KEY)
++        self.assertEqual(len(self.deliveries), 2)
++        self.assertEqual(p.session_data[KEY]["unanswered_count"], 2)
++
++    async def test_persisted_history_survives_normalization_and_does_not_cross_groups(
++        self,
++    ):
++        p = self.plugin
++        await self.start()
++        p.session_data[KEY]["recent_proactive_messages"] = [
++            {"sent_at": time.time(), "text": "A short reply."}
++        ]
++        restored = deepcopy(p.session_data)
++        p.session_data = restored
++        p._normalize_session_data()
++        await p.check_and_chat(KEY)
++        self.assertEqual(self.deliveries, [])
++        p.session_data["test:GroupMessage:777"] = p.session_data.pop(KEY)
++        await p.check_and_chat(KEY)
++        self.assertEqual(len(self.deliveries), 1)
++
++    async def test_media_or_already_delivered_tools_are_not_suppressed_as_text_repeats(
++        self,
++    ):
++        from astrbot.core.message.components import Image
++
++        for delivered in (False, True):
++            with self.subTest(direct_delivery=delivered):
++                p = self.plugin
++                p.session_data[KEY] = {
++                    "recent_proactive_messages": [
++                        {"sent_at": time.time(), "text": "A short reply."}
++                    ],
++                    "unanswered_count": 0,
++                }
++                p._extract_response_chain = lambda response, delivered=delivered: (
++                    []
++                    if delivered
++                    else [Image.fromURL("https://example.org/fixture.png")]
++                )
++                p._build_proactive_event = lambda sid, delivered=delivered: type(
++                    "Event",
++                    (),
++                    {
++                        "get_extra": lambda self, key, default=None: (
++                            delivered if key == "proactive_tool_delivered" else default
++                        )
++                    },
++                )()
++                before = p._send_proactive_message.await_count
++                await p.check_and_chat(KEY)
++                self.assertEqual(p._send_proactive_message.await_count, before + 1)

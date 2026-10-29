@@ -3,9 +3,9 @@
 import json
 import time
 import uuid
-from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit, urlunsplit
 
 from astrbot.api.event import AstrMessageEvent
 from astrbot.api.platform import MessageType
@@ -196,6 +196,7 @@ class GroupContext:
                 "role": "user",
                 "qq": str(source_qq),
                 "name": str(source_name)[:80],
+                "source_kind": "video_summary",
                 "text": "[此成员所发视频的抽帧摘要，非口述，未识别音频] " + text[:730],
             }
         )
@@ -233,6 +234,49 @@ class GroupContext:
         })
         self._save()
         event.set_extra("local_codex_parser_key", key)
+
+    def activity_snapshot(self, event: AstrMessageEvent) -> dict:
+        """Describe scoped public activity without inferring moods or relationships."""
+        scope = self._scope(event)
+        if not scope:
+            return {}
+        now = time.time()
+        cutoff = now - 60 * self._limit("group_context_max_minutes", 360, 5, 1440)
+        rows = [
+            row
+            for row in self.rows
+            if row["scope"] == scope
+            and cutoff <= row["time"] <= now
+            and row["id"] != event.get_extra("local_codex_group_row")
+        ]
+        # Parsed pages and video interpretations are material, not a new speaker turn.
+        users = [
+            row
+            for row in rows
+            if row["role"] == "user"
+            and not row.get("source_kind")
+            and not row.get("parser_key")
+            and not row["text"].startswith("[此成员所发视频")
+        ]
+        replies = [row for row in rows if row["role"] == "assistant"]
+        sender = "" if is_proactive_group(event) else str(event.get_sender_id())
+        addressed = [row for row in replies if sender and row.get("reply_to") == sender]
+
+        def minutes(items: list[dict]) -> float | None:
+            return (
+                round((now - max(row["time"] for row in items)) / 60, 1)
+                if items
+                else None
+            )
+
+        return {
+            "近五分钟发言人数": len(
+                {row["qq"] for row in users if now - row["time"] <= 300}
+            ),
+            "距上一条群员发言分钟": minutes(users),
+            "距我上次发言分钟": minutes(replies),
+            "距我上次回复当前成员分钟": minutes(addressed),
+        }
 
     def instructions(self, event: AstrMessageEvent, proactive: bool = False) -> str:
         """Render only this platform instance's group, retaining current identity."""
@@ -289,6 +333,9 @@ class GroupContext:
             "被提及者的设置也不替代提问者的设置。reply_to 表示机器人当时回复的 QQ。"
             "结合时间和最近话题理解‘刚才/上一个人’；信息不足就说明，不编造共同经历。"
             "这里没有私聊内容；/new 只重开个人对话，不删除群公共记忆。\n"
+            + "互动时间线（只统计本群真实消息，不代表好感度）："
+            + json.dumps(self.activity_snapshot(event), ensure_ascii=False)
+            + "\n按时间辨别正在接话还是重开话题；空值表示没有可用记录，不等于从未聊过。\n"
             + "\n".join(reversed(lines))
             + "\n本群公共上下文结束。\n"
         )

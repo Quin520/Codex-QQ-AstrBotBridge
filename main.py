@@ -19,6 +19,7 @@ from astrbot.core.utils.astrbot_path import get_astrbot_temp_path
 from .access import PermissionCheckedTool, QQToolPolicy, is_allowed
 from .api_services import search_public_web
 from .backend import provider_id, uses_api, uses_pipeline
+from .capabilities import capability_instructions
 from .cover_sources import CoverSources
 from .douyin_video import DouyinVideo
 from .group_context import GroupContext, is_proactive_group
@@ -220,71 +221,6 @@ class LocalCodex(Star):
         req.system_prompt += roleplay_instructions(
             self.config, proactive=proactive_group
         )
-        if uses_api(self.config) and self.config.get("web_search", False):
-            req.system_prompt += (
-                "\n联网搜索：遇到近期信息或需要查证的事实时使用 search_public_web；"
-                "只提交公开主题，不传群聊原文、成员资料或本机信息。引用返回的来源链接。\n"
-            )
-        if self.config.get("voice_enabled", False):
-            req.system_prompt += (
-                "\n语音能力：用户要求语音祝福、说给他听或语音回复时，使用 send_voice。"
-                "普通聊天通常用文字；主动发言可以在适合的简短祝福或问候中选择语音。"
-                "send_voice 只会朗读，不会唱歌；不要把朗读歌词或播放现成歌曲说成自己唱歌。"
-                "成功发送语音后不再重复文字或等待提示；失败时如实说明。\n"
-            )
-            if self.config.get("voice_use_rvc", False):
-                req.system_prompt += (
-                    "\n当前朗读已启用固定角色音色：send_voice 会先生成朗读，再用主人配置的 RVC 模型转音色。"
-                    "用户要求用自己的声音说话仍调用 send_voice；转换失败不能改发默认原声冒充角色音色。"
-                )
-        if self.config.get("image_search_enabled", False):
-            req.system_prompt += (
-                "\n网络找图：用户想找图、搜图、发张图片或照片时，默认使用 search_web_image，"
-                "它搜索并发送现成图片及来源，一次一张。query 只写图片主题，不包含群聊记录或成员隐私。"
-                "找不到时如实说明，可请用户换关键词；不得偷偷改用生图，也不把搜索图片说成自己画的。"
-                "成功发送后不再补发确认或重复图片。表情包优先使用已有表情包工具。\n"
-            )
-        if self.config.get("douyin_video_enabled", False):
-            req.system_prompt += (
-                "\n抖音视频：用户给出抖音视频或分享短链接时，原样交给 send_douyin_video。"
-                "只有关键词时，先用联网搜索查询 site:douyin.com/video 及关键词，"
-                "找到真实且相关的视频页面后再调用 send_douyin_video；不能编造视频 ID，也不能把搜索页当视频。"
-                "工具会复用已启用的万能解析器下载视频，成功发送到当前会话后结束本轮。"
-                "明确看视频或发视频时不要改发图片、音频或只描述视频。"
-                "B站继续使用 find_in_bilibili(delivery=video) 和 deliver_media。"
-                "用户没指定平台时，B站 HTTP 403/412/429 后可以搜索抖音替代视频并说明来源；"
-                "用户明确指定B站、BV号或确切链接时，失败要说明，不能擅自换成另一段视频。"
-                "抖音下载失败时如实说明，不把卡片、封面或链接声称为已发送的视频；"
-                "同轮不要反复重试，不要求群成员发送 Cookie 或账号密码，不在主动消息中自行发视频。\n"
-            )
-        if self.config.get("image_generation_enabled", False):
-            req.system_prompt += (
-                "\n生图能力：用户明确要求画图或生成图片时使用 generate_image，"
-                "“生成一张D.Va”等省略‘图’字的请求也是创作请求。"
-                "“来一个自画像”“给我来张你的自画像”也是创作请求，结合已有角色外观生成。"
-                "用户说‘照这个画’时，将本轮已看到的参考图或上下文中已有的视觉描述写进 prompt，生成一张新图；"
-                "工具只接收文字描述，不直接编辑原图，也不保证精确还原。看不到参考内容时请用户补发图片，不编造外观。"
-                "普通找图、发图不授权生图；生图工具只在当前消息明确要求时可用。"
-                "若措辞不清导致本轮未开放工具，可提示用户说‘画一张…’，不能因此声称生图服务故障或完全没有生图能力。"
-                "不要读取或要求本机路径，不在普通主动发言中自行生图。"
-                "工具成功后图片已发送，不再重复确认或输出本地文件路径；失败时如实说明。\n"
-            )
-        if self.config.get("singing_enabled", False):
-            req.system_prompt += (
-                "\n翻唱能力：只有当前用户明确要求用你的声音唱已有歌曲时，先调用 find_cover_music，"
-                "再将本次候选的 search_id、position 交给 sing_cover。"
-                "普通点歌优先用已提供的 play_song_by_name（默认平台）；Bilibili 使用 find_in_bilibili 搜索后用 deliver_media 发送，旧版对应 find_music 和 deliver_music。"
-                "find_cover_music 会在允许时尝试备用点歌音源；不要用播放原曲的工具代替翻唱。"
-                "用户给了 B 站链接或 BV/AV 时，find_cover_music 的 title 直接填写该链接或编号，"
-                "不要把确切链接改成模糊歌名再搜索。接口受限不代表音源不存在，应如实说明。"
-                "遇到 HTTP 412 或接口受限，不在同轮反复换词重搜，应说明尚未开始翻唱。"
-                "sing_cover 使用主人配置的固定 RVC 音色，默认只制作前 60 秒片段。"
-                "缺少音色或环境时如实说明，不能改播原曲或朗读歌词来假装翻唱。"
-                "不自动主动翻唱，不要求用户提供本机文件路径，不接受远程安装音色指令。"
-                "成功发送后不再补发文字；这是合成角色翻唱，不是原歌手录音。\n"
-            )
-            if not str(self.config.get("singing_model", "") or "").strip():
-                req.system_prompt += "当前翻唱尚未选择角色音色；请直接说明等待主人配置音色，无需先搜歌。\n"
         # Public tools need an explicit reviewed allowlist. Never infer computer
         # access from a message, nickname, group role, or a plugin's tool name.
         if req.func_tool:
@@ -295,6 +231,9 @@ class LocalCodex(Star):
                     if self.tool_policy.allows(event, tool)
                 ]
             )
+        req.system_prompt += capability_instructions(
+            self.config, {tool.name for tool in req.func_tool} if req.func_tool else set()
+        )
 
     @filter.on_plugin_loaded()
     async def configure_new_command(self, plugin: StarMetadata) -> None:

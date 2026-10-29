@@ -3,3 +3,4 @@ compat/self_learning/*.patch whitespace=-blank-at-eol
 compat/proactive_chat/*.patch whitespace=-blank-at-eol
 compat/livingmemory/*.patch whitespace=-blank-at-eol
 compat/parser/cache-expiry.patch whitespace=-blank-at-eol
+compat/natural-chat-20261029/*.patch whitespace=-blank-at-eol

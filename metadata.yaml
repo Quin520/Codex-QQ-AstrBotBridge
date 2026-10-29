@@ -1,7 +1,7 @@
 name: astrbot_plugin_local_codex
 display_name: QQ 角色与群记忆桥接
 desc: API 或本机 Codex 接入 AstrBot，保留 QQ 个性化、群公共上下文、学习审批及语音、视频、生图工具。
-version: v0.4.0
+version: v0.4.1
 author: Quin520
 repo: https://github.com/Quin520/Codex-QQ-AstrBotBridge
 astrbot_version: ">=4.29.1,<5"
